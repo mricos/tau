@@ -1,0 +1,28 @@
+{
+  "engine": {
+    "sample_rate": 48000,
+    "frames_per_buffer": 512,
+    "osc_port": 9001,
+    "master_gain": 0.8
+  },
+  "channels": [
+    { "gain": 1.0, "pan": -0.5, "filter": "off", "cutoff": 1000, "q": 0.707 },
+    { "gain": 1.0, "pan": 0.5, "filter": "off", "cutoff": 1000, "q": 0.707 },
+    { "gain": 1.0, "pan": 0.0, "filter": "off", "cutoff": 1000, "q": 0.707 },
+    { "gain": 1.0, "pan": 0.0, "filter": "off", "cutoff": 1000, "q": 0.707 }
+  ],
+  "slots": [],
+  "voices": [
+    {
+      "index": 1,
+      "on": false,
+      "wave": "sine",
+      "freq": 220.0,
+      "gain": 0.3,
+      "channel": 1,
+      "tau_a": 0.005,
+      "tau_b": 0.020,
+      "duty_bias": 0.5
+    }
+  ]
+}
