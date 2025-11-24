@@ -137,7 +137,7 @@ class Transport:
         """Lazily initialize tau connection."""
         if self.tau is None:
             try:
-                from .tau_playback import TauMultitrack
+                from .integration.tau_playback import TauMultitrack
                 tau_inst = TauMultitrack()
                 # Only set if connection works
                 if tau_inst.check_connection():
@@ -405,7 +405,7 @@ class AppState:
         """Initialize lanes after data buffer is available."""
         if self.lanes is None:
             # Import here to avoid circular dependency
-            from .lanes import LaneManager
+            from .content.lanes import LaneManager
             # Determine column count from data buffer
             num_columns = len(self.data_buffer[0][1]) if self.data_buffer else 4
 

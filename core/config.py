@@ -17,7 +17,7 @@ except ImportError:
     # Fallback - manual TOML writing
     toml_writer = None
 
-from .state import AppState, KernelParams, Marker
+from .core.state import AppState, KernelParams, Marker
 
 
 def save_config(state: AppState, path: str):
@@ -140,7 +140,7 @@ def load_config(path: str) -> Optional[AppState]:
 
     # Load lanes
     if 'lanes' in config and state.lanes:
-        from .lanes import LaneDisplayMode
+        from .content.lanes import LaneDisplayMode
         for lane_config in config['lanes']:
             lane_id = lane_config.get('id')
             lane = state.lanes.get_lane(lane_id)

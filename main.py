@@ -12,20 +12,20 @@ import time
 import curses
 import signal
 
-from .state import AppState
-from .config import load_config, save_config, get_default_config_path
-from .data_loader import load_data_file, compute_duration
+from .core.state import AppState
+from .core.config import load_config, save_config, get_default_config_path
+from .data.data_loader import load_data_file, compute_duration
 from .cli.manager import CLIManager
-from .commands_api import COMMAND_REGISTRY
-from .command_definitions import register_all_commands
+from .core.commands_api import COMMAND_REGISTRY
+from .commands import register_all_commands
 from .rendering.helpers import init_colors, safe_addstr
 from .rendering.sparkline import render_sparkline
 from .rendering.waveform import render_waveform_envelope, render_waveform_points
 from .rendering.pinned import render_pinned_compact, render_pinned_expanded
 from .rendering.header import render_header
 from .rendering.cli import CLIRenderer
-from .project import TauProject
-from .tscale_runner import TscaleRunner
+from .core.project import TauProject
+from .integration.tscale_runner import TscaleRunner
 
 
 REFRESH_HZ = 30  # Display refresh rate
@@ -99,7 +99,7 @@ class App:
         self.state.cli = self.cli  # Make CLI accessible from state
 
         # Set up rich completion provider
-        from .completion import get_completions_rich
+        from .ui.completion import get_completions_rich
         self.cli.set_completion_rich_provider(get_completions_rich)
 
         # Try to load local config
@@ -435,7 +435,7 @@ class App:
                     break
 
             # Prepare label
-            from .lanes import LaneDisplayMode
+            from .content.lanes import LaneDisplayMode
             mode_markers = {
                 LaneDisplayMode.HIDDEN: "○",
                 LaneDisplayMode.COMPACT: "c",
@@ -527,7 +527,7 @@ class App:
                     break
 
             # Prepare label
-            from .lanes import LaneDisplayMode
+            from .content.lanes import LaneDisplayMode
             mode_markers = {
                 LaneDisplayMode.HIDDEN: "○",
                 LaneDisplayMode.COMPACT: "c",
@@ -652,7 +652,7 @@ class App:
 
     def _draw_header(self, scr, width):
         """Draw 2-line header with transport and lane status."""
-        from .ui_utils import WidthContext, truncate_middle
+        from .ui.ui_utils import WidthContext, truncate_middle
 
         # Width context for adaptive rendering
         wctx = WidthContext.from_width(width)
@@ -674,7 +674,7 @@ class App:
         safe_addstr(scr, 0, 0, line1[:width-1], curses.A_REVERSE)
 
         # Line 2: Lane indicators
-        from .lanes import LaneDisplayMode
+        from .content.lanes import LaneDisplayMode
         lane_ind = ""
         num_lanes_to_show = 6 if wctx.compact else 6
 

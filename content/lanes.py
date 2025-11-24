@@ -4,9 +4,9 @@ Each lane is a data channel with independent display mode.
 """
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
-from enum import IntEnum
+from enum import IntEnum, Enum
 
 
 class LaneDisplayMode(IntEnum):
@@ -14,6 +14,61 @@ class LaneDisplayMode(IntEnum):
     HIDDEN = 0      # Not visible
     COMPACT = 1     # 1-line sparkline (default)
     FULL = 8        # Multi-line waveform (configurable per lane)
+
+
+class LaneState(Enum):
+    """State machine states for lane interaction."""
+    NORMAL = "normal"          # Default state
+    SELECTED = "selected"      # Recently selected (highlighted)
+    EDITING = "editing"        # Content being edited
+    PLAYING = "playing"        # Actively playing/rendering (timebased)
+    HIDDEN = "hidden"          # Not visible
+    PINNED = "pinned"          # Locked in position
+
+
+class LaneStateMachine:
+    """
+    State machine for lane keyboard interactions.
+
+    Handles transitions like:
+    - DOWN → SELECTED (on double-click)
+    - UP-QUICK → toggle visibility
+    - UP-MEDIUM → toggle expanded
+    """
+
+    def __init__(self, lane_id: int):
+        self.lane_id = lane_id
+        self.state = LaneState.NORMAL
+        self.last_action_time = 0.0
+        self.double_click_threshold = 0.3  # seconds
+
+    def on_down(self, current_time: float):
+        """Handle mouse/key down event."""
+        delta = current_time - self.last_action_time
+        if delta < self.double_click_threshold:
+            # Double-click detected
+            self.state = LaneState.SELECTED
+        self.last_action_time = current_time
+
+    def on_up_quick(self):
+        """Handle quick up event (toggle visibility)."""
+        if self.state == LaneState.NORMAL:
+            self.state = LaneState.HIDDEN
+        elif self.state == LaneState.HIDDEN:
+            self.state = LaneState.NORMAL
+
+    def on_up_medium(self):
+        """Handle medium up event (toggle expanded)."""
+        # Toggle between COMPACT and FULL modes
+        pass  # Handled by Lane.toggle_mode()
+
+    def is_selected(self) -> bool:
+        """Check if lane is in selected state."""
+        return self.state == LaneState.SELECTED
+
+    def reset(self):
+        """Reset to normal state."""
+        self.state = LaneState.NORMAL
 
 
 @dataclass
@@ -32,7 +87,11 @@ class Lane:
     color: int = 1                  # Curses color pair
     clip_name: str = ""             # Clip/file name (max 16 chars, shown in lane)
 
-    # Pinned content (for pinned lanes)
+    # Clip-based architecture (new)
+    clip_stack: List = field(default_factory=list)  # List[Clip] - multiple clips can be layered
+    state_machine: LaneStateMachine = None          # State machine for interactions
+
+    # Pinned content (for pinned lanes - legacy, will be replaced by clips)
     content: List[str] = None       # Text lines to display
     content_colors: List[int] = None  # Color pair for each content line
 
@@ -45,6 +104,8 @@ class Lane:
             self.content = []
         if self.content_colors is None:
             self.content_colors = []
+        if self.state_machine is None:
+            self.state_machine = LaneStateMachine(self.id)
 
     def get_height(self) -> int:
         """Get current height based on display mode."""

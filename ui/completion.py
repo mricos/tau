@@ -6,7 +6,7 @@ Provides rich completion items with descriptions, categories, and preview help.
 
 from dataclasses import dataclass
 from typing import List, Optional
-from .commands_api import COMMAND_REGISTRY, CommandCategory
+from .core.commands_api import COMMAND_REGISTRY, CommandCategory
 
 
 @dataclass

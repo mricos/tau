@@ -14,8 +14,8 @@ import os
 import json
 from pathlib import Path
 from typing import Optional, List
-from .trs import TRSStorage
-from .cwd_manager import CWDManager
+from .data.trs import TRSStorage
+from .data.cwd_manager import CWDManager
 
 
 class TauProject:

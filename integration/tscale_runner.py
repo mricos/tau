@@ -9,8 +9,8 @@ import tempfile
 import toml
 from pathlib import Path
 from typing import Optional, List
-from .trs import TRSStorage
-from .state import KernelParams
+from .data.trs import TRSStorage
+from .core.state import KernelParams
 
 
 class TscaleRunner:
