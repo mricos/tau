@@ -1,0 +1,17 @@
+# tau runtime data - not checked in
+data/
+!data/sessions/default.json
+!data/config.json
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# REPL temporary files
+test_script.tau
+*.tau
+
+# macOS
+.DS_Store

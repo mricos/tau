@@ -267,6 +267,33 @@ static inline float voice_tick(Voice* v){
     return y * g;
 }
 
+// ---------- Recorder ----------
+typedef struct {
+    ma_encoder encoder;
+    _Atomic int recording;      // Is recording active?
+    _Atomic int haveEncoder;    // Is encoder initialized?
+    _Atomic uint64_t t0_ns;     // Monotonic timestamp (nanoseconds)
+    _Atomic uint64_t frames;    // Frames recorded
+    char path[1024];            // Output file path
+} Recorder;
+
+static void recorder_init(Recorder* r){
+    memset(r, 0, sizeof(*r));
+    atomic_store(&r->recording, 0);
+    atomic_store(&r->haveEncoder, 0);
+    atomic_store(&r->t0_ns, 0);
+    atomic_store(&r->frames, 0);
+}
+
+static void recorder_free(Recorder* r){
+    if (atomic_load(&r->haveEncoder)){
+        ma_encoder_uninit(&r->encoder);
+        atomic_store(&r->haveEncoder, 0);
+    }
+    atomic_store(&r->recording, 0);
+    atomic_store(&r->frames, 0);
+}
+
 // ---------- Engine ----------
 typedef struct {
     ma_device device;
@@ -279,14 +306,19 @@ typedef struct {
     SampleSlot slots[NUM_SLOTS];
     Voice    voices[NUM_VOICES];
 
+    Recorder recorder;           // Audio input recorder
+
     float chMono[NUM_CHANNELS];
 } Engine;
 
 static Engine G;
 
 static void data_cb(ma_device* dev, void* pOut, const void* pIn, ma_uint32 nframes){
-    (void)dev; (void)pIn;
+    (void)dev;
     float* out = (float*)pOut;
+    const float* in = (const float*)pIn;
+
+    // PLAYBACK: Generate output
     for (ma_uint32 i=0;i<nframes;i++){
         for (int c=0;c<NUM_CHANNELS;c++) G.chMono[c]=0.0f;
 
@@ -307,6 +339,19 @@ static void data_cb(ma_device* dev, void* pOut, const void* pIn, ma_uint32 nfram
         float mg = atomic_load(&G.masterGain);
         out[2*i+0] = L * mg;
         out[2*i+1] = R * mg;
+    }
+
+    // RECORDING: Capture input if recording active
+    if (atomic_load(&G.recorder.recording) && atomic_load(&G.recorder.haveEncoder) && in != NULL){
+        ma_uint64 written = 0;
+        ma_result result = ma_encoder_write_pcm_frames(&G.recorder.encoder, in, nframes, &written);
+        if (result == MA_SUCCESS){
+            atomic_fetch_add(&G.recorder.frames, written);
+        } else {
+            // Stop recording on error
+            fprintf(stderr, "Recording error: failed to write frames\n");
+            atomic_store(&G.recorder.recording, 0);
+        }
     }
 }
 
@@ -755,6 +800,131 @@ static void process_command(const char* cmd, char* response, size_t resp_size,
         return;
     }
 
+    // RECORD <cmd> [args...]
+    if (strcmp(tokens[0], "RECORD") == 0){
+        if (ntok < 2){
+            snprintf(response, resp_size, "ERROR RECORD <cmd>\n");
+            return;
+        }
+
+        // RECORD START <path> <t0_monotonic_ns>
+        if (strcmp(tokens[1], "START") == 0){
+            if (ntok < 4){
+                snprintf(response, resp_size, "ERROR RECORD START <path> <t0_ns>\n");
+                return;
+            }
+
+            // Check if already recording
+            if (atomic_load(&G.recorder.recording)){
+                snprintf(response, resp_size, "ERROR Already recording\n");
+                return;
+            }
+
+            // Reconstruct path (may have spaces)
+            char path[1024] = "";
+            size_t path_len = 0;
+            for (int i = 2; i < ntok - 1; i++){  // All tokens except last (t0_ns)
+                if (i > 2) {
+                    size_t space_needed = path_len + 1;
+                    if (space_needed >= sizeof(path) - 1) {
+                        snprintf(response, resp_size, "ERROR Path too long\n");
+                        return;
+                    }
+                    strcat(path, " ");
+                    path_len++;
+                }
+                size_t token_len = strlen(tokens[i]);
+                if (path_len + token_len >= sizeof(path) - 1) {
+                    snprintf(response, resp_size, "ERROR Path too long\n");
+                    return;
+                }
+                strcat(path, tokens[i]);
+                path_len += token_len;
+            }
+
+            // Parse T0 timestamp (last token)
+            uint64_t t0_ns = strtoull(tokens[ntok - 1], NULL, 10);
+
+            // Initialize encoder
+            ma_encoder_config config = ma_encoder_config_init(
+                ma_encoding_format_wav,
+                ma_format_f32,
+                2,  // Stereo
+                G.sr
+            );
+
+            ma_result result = ma_encoder_init_file(path, &config, &G.recorder.encoder);
+            if (result != MA_SUCCESS){
+                snprintf(response, resp_size, "ERROR Failed to init encoder: %d\n", result);
+                return;
+            }
+
+            // Store recording state
+            strncpy(G.recorder.path, path, sizeof(G.recorder.path) - 1);
+            G.recorder.path[sizeof(G.recorder.path) - 1] = '\0';
+            atomic_store(&G.recorder.t0_ns, t0_ns);
+            atomic_store(&G.recorder.frames, 0);
+            atomic_store(&G.recorder.haveEncoder, 1);
+            atomic_store(&G.recorder.recording, 1);
+
+            snprintf(response, resp_size, "OK RECORD STARTED path=%s t0=%llu\n", path, t0_ns);
+
+            // Broadcast event
+            char event[256];
+            snprintf(event, sizeof(event), "EVENT RECORD STARTED\n");
+            srv_broadcast(event);
+            return;
+        }
+
+        // RECORD STOP
+        if (strcmp(tokens[1], "STOP") == 0){
+            if (!atomic_load(&G.recorder.recording)){
+                snprintf(response, resp_size, "ERROR Not recording\n");
+                return;
+            }
+
+            // Stop recording
+            atomic_store(&G.recorder.recording, 0);
+
+            // Get final stats before cleanup
+            uint64_t frames = atomic_load(&G.recorder.frames);
+            double duration = (double)frames / (double)G.sr;
+
+            // Uninit encoder
+            if (atomic_load(&G.recorder.haveEncoder)){
+                ma_encoder_uninit(&G.recorder.encoder);
+                atomic_store(&G.recorder.haveEncoder, 0);
+            }
+
+            snprintf(response, resp_size, "OK RECORD STOPPED frames=%llu duration=%.3f\n",
+                     frames, duration);
+
+            // Broadcast event
+            char event[256];
+            snprintf(event, sizeof(event), "EVENT RECORD STOPPED frames=%llu\n", frames);
+            srv_broadcast(event);
+            return;
+        }
+
+        // RECORD STATUS
+        if (strcmp(tokens[1], "STATUS") == 0){
+            if (atomic_load(&G.recorder.recording)){
+                uint64_t frames = atomic_load(&G.recorder.frames);
+                uint64_t t0_ns = atomic_load(&G.recorder.t0_ns);
+                double duration = (double)frames / (double)G.sr;
+                snprintf(response, resp_size,
+                         "OK RECORDING path=%s frames=%llu duration=%.3f t0=%llu\n",
+                         G.recorder.path, frames, duration, t0_ns);
+            } else {
+                snprintf(response, resp_size, "OK NOT_RECORDING\n");
+            }
+            return;
+        }
+
+        snprintf(response, resp_size, "ERROR Unknown RECORD cmd: %s\n", tokens[1]);
+        return;
+    }
+
     // QUIT
     if (strcmp(tokens[0], "QUIT") == 0){
         snprintf(response, resp_size, "OK Shutting down\n");
@@ -1035,20 +1205,31 @@ static int engine_init(Engine* E, uint32_t sr, uint32_t frames){
     for (int c=0;c<NUM_CHANNELS;c++) channel_init(&E->ch[c], (float)sr);
     for (int s=0;s<NUM_SLOTS;s++)    slot_init(&E->slots[s]);
     for (int v=0;v<NUM_VOICES;v++)   voice_init(&E->voices[v], (float)sr);
+    recorder_init(&E->recorder);
 
-    E->dcfg = ma_device_config_init(ma_device_type_playback);
+    // DUPLEX mode: simultaneous playback + capture
+    E->dcfg = ma_device_config_init(ma_device_type_duplex);
     E->dcfg.sampleRate = sr;
+
+    // Playback configuration
     E->dcfg.playback.format   = ma_format_f32;
     E->dcfg.playback.channels = 2;
+
+    // Capture configuration (for recording)
+    E->dcfg.capture.format   = ma_format_f32;
+    E->dcfg.capture.channels = 2;  // Stereo input
+
     E->dcfg.dataCallback = data_cb;
     E->dcfg.performanceProfile = ma_performance_profile_low_latency;
     E->dcfg.periodSizeInFrames = frames;
+
     if (ma_device_init(NULL, &E->dcfg, &E->device) != MA_SUCCESS) return -1;
     return 0;
 }
 
 static void engine_uninit(Engine* E){
     for (int s=0;s<NUM_SLOTS;s++) slot_free(&E->slots[s]);
+    recorder_free(&E->recorder);
     ma_device_uninit(&E->device);
 }
 
