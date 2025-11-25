@@ -296,11 +296,18 @@ static void recorder_free(Recorder* r){
 
 // ---------- Engine ----------
 typedef struct {
+    ma_context context;          // For device enumeration
     ma_device device;
     ma_device_config dcfg;
     uint32_t sr;
     uint32_t framesPerBuffer;
     _Atomic float masterGain;
+
+    // Selected device IDs (empty = default)
+    ma_device_id* captureDeviceId;
+    ma_device_id* playbackDeviceId;
+    char captureDeviceName[256];
+    char playbackDeviceName[256];
 
     Channel  ch[NUM_CHANNELS];
     SampleSlot slots[NUM_SLOTS];
@@ -478,6 +485,179 @@ static void process_command(const char* cmd, char* response, size_t resp_size,
     // STATUS
     if (strcmp(tokens[0], "STATUS") == 0){
         snprintf(response, resp_size, "OK STATUS running\n");
+        return;
+    }
+
+    // DEVICES [capture|playback]
+    // Lists available audio devices
+    if (strcmp(tokens[0], "DEVICES") == 0){
+        ma_device_info* captureDevices;
+        ma_uint32 captureCount;
+        ma_device_info* playbackDevices;
+        ma_uint32 playbackCount;
+
+        ma_result result = ma_context_get_devices(
+            &G.context,
+            &playbackDevices, &playbackCount,
+            &captureDevices, &captureCount
+        );
+
+        if (result != MA_SUCCESS){
+            snprintf(response, resp_size, "ERROR Failed to enumerate devices: %d\n", result);
+            return;
+        }
+
+        // Check if filtering by type
+        int show_capture = 1, show_playback = 1;
+        if (ntok >= 2){
+            if (strcasecmp(tokens[1], "capture") == 0 || strcasecmp(tokens[1], "input") == 0){
+                show_playback = 0;
+            } else if (strcasecmp(tokens[1], "playback") == 0 || strcasecmp(tokens[1], "output") == 0){
+                show_capture = 0;
+            }
+        }
+
+        // Build response with device list
+        // Format: OK DEVICES\nCAPTURE <idx> <isDefault> <name>\nPLAYBACK <idx> <isDefault> <name>\n...
+        char* p = response;
+        size_t remaining = resp_size;
+        int n;
+
+        n = snprintf(p, remaining, "OK DEVICES capture=%u playback=%u\n",
+                     show_capture ? captureCount : 0,
+                     show_playback ? playbackCount : 0);
+        p += n; remaining -= n;
+
+        if (show_capture){
+            for (ma_uint32 i = 0; i < captureCount && remaining > 128; i++){
+                int is_default = captureDevices[i].isDefault ? 1 : 0;
+                int is_current = (G.captureDeviceName[0] &&
+                                  strcmp(G.captureDeviceName, captureDevices[i].name) == 0) ? 1 : 0;
+                n = snprintf(p, remaining, "CAPTURE %u %d %d %s\n",
+                             i, is_default, is_current, captureDevices[i].name);
+                p += n; remaining -= n;
+            }
+        }
+
+        if (show_playback){
+            for (ma_uint32 i = 0; i < playbackCount && remaining > 128; i++){
+                int is_default = playbackDevices[i].isDefault ? 1 : 0;
+                int is_current = (G.playbackDeviceName[0] &&
+                                  strcmp(G.playbackDeviceName, playbackDevices[i].name) == 0) ? 1 : 0;
+                n = snprintf(p, remaining, "PLAYBACK %u %d %d %s\n",
+                             i, is_default, is_current, playbackDevices[i].name);
+                p += n; remaining -= n;
+            }
+        }
+
+        return;
+    }
+
+    // DEVICE <capture|playback> <index|name>
+    // Select a specific device (requires engine restart to take effect)
+    if (strcmp(tokens[0], "DEVICE") == 0){
+        if (ntok < 3){
+            snprintf(response, resp_size, "ERROR DEVICE <capture|playback> <index|name>\n");
+            return;
+        }
+
+        int is_capture = (strcasecmp(tokens[1], "capture") == 0 || strcasecmp(tokens[1], "input") == 0);
+        int is_playback = (strcasecmp(tokens[1], "playback") == 0 || strcasecmp(tokens[1], "output") == 0);
+
+        if (!is_capture && !is_playback){
+            snprintf(response, resp_size, "ERROR Unknown device type: %s (use capture or playback)\n", tokens[1]);
+            return;
+        }
+
+        // Get device list
+        ma_device_info* captureDevices;
+        ma_uint32 captureCount;
+        ma_device_info* playbackDevices;
+        ma_uint32 playbackCount;
+
+        ma_result result = ma_context_get_devices(
+            &G.context,
+            &playbackDevices, &playbackCount,
+            &captureDevices, &captureCount
+        );
+
+        if (result != MA_SUCCESS){
+            snprintf(response, resp_size, "ERROR Failed to enumerate devices: %d\n", result);
+            return;
+        }
+
+        ma_device_info* devices = is_capture ? captureDevices : playbackDevices;
+        ma_uint32 count = is_capture ? captureCount : playbackCount;
+
+        // Reconstruct device identifier (may have spaces)
+        char identifier[512] = "";
+        for (int i = 2; i < ntok; i++){
+            if (i > 2) strcat(identifier, " ");
+            strcat(identifier, tokens[i]);
+        }
+
+        // Find device by index or name
+        ma_device_info* found = NULL;
+        int found_idx = -1;
+
+        // Check if it's "default"
+        if (strcasecmp(identifier, "default") == 0){
+            for (ma_uint32 i = 0; i < count; i++){
+                if (devices[i].isDefault){
+                    found = &devices[i];
+                    found_idx = i;
+                    break;
+                }
+            }
+        }
+        // Check if it's a numeric index
+        else if (identifier[0] >= '0' && identifier[0] <= '9'){
+            int idx = atoi(identifier);
+            if (idx >= 0 && (ma_uint32)idx < count){
+                found = &devices[idx];
+                found_idx = idx;
+            }
+        }
+        // Otherwise match by name (substring match)
+        else {
+            for (ma_uint32 i = 0; i < count; i++){
+                if (strcasestr(devices[i].name, identifier) != NULL){
+                    found = &devices[i];
+                    found_idx = i;
+                    break;
+                }
+            }
+        }
+
+        if (!found){
+            snprintf(response, resp_size, "ERROR Device not found: %s\n", identifier);
+            return;
+        }
+
+        // Store the selection (will be used on next engine restart)
+        if (is_capture){
+            // Allocate and copy device ID
+            if (G.captureDeviceId == NULL){
+                G.captureDeviceId = (ma_device_id*)malloc(sizeof(ma_device_id));
+            }
+            memcpy(G.captureDeviceId, &found->id, sizeof(ma_device_id));
+            strncpy(G.captureDeviceName, found->name, sizeof(G.captureDeviceName) - 1);
+            G.captureDeviceName[sizeof(G.captureDeviceName) - 1] = '\0';
+
+            snprintf(response, resp_size, "OK DEVICE CAPTURE %d %s (restart required)\n",
+                     found_idx, found->name);
+        } else {
+            if (G.playbackDeviceId == NULL){
+                G.playbackDeviceId = (ma_device_id*)malloc(sizeof(ma_device_id));
+            }
+            memcpy(G.playbackDeviceId, &found->id, sizeof(ma_device_id));
+            strncpy(G.playbackDeviceName, found->name, sizeof(G.playbackDeviceName) - 1);
+            G.playbackDeviceName[sizeof(G.playbackDeviceName) - 1] = '\0';
+
+            snprintf(response, resp_size, "OK DEVICE PLAYBACK %d %s (restart required)\n",
+                     found_idx, found->name);
+        }
+
         return;
     }
 
@@ -1202,6 +1382,13 @@ static int engine_init(Engine* E, uint32_t sr, uint32_t frames){
     E->framesPerBuffer = frames;
     atomic_store(&E->masterGain, 0.8f);
 
+    // Initialize context for device enumeration (cross-platform)
+    ma_context_config ctx_config = ma_context_config_init();
+    if (ma_context_init(NULL, 0, &ctx_config, &E->context) != MA_SUCCESS){
+        fprintf(stderr, "Failed to initialize audio context\n");
+        return -1;
+    }
+
     for (int c=0;c<NUM_CHANNELS;c++) channel_init(&E->ch[c], (float)sr);
     for (int s=0;s<NUM_SLOTS;s++)    slot_init(&E->slots[s]);
     for (int v=0;v<NUM_VOICES;v++)   voice_init(&E->voices[v], (float)sr);
@@ -1214,16 +1401,29 @@ static int engine_init(Engine* E, uint32_t sr, uint32_t frames){
     // Playback configuration
     E->dcfg.playback.format   = ma_format_f32;
     E->dcfg.playback.channels = 2;
+    E->dcfg.playback.pDeviceID = E->playbackDeviceId;  // NULL = default
 
     // Capture configuration (for recording)
     E->dcfg.capture.format   = ma_format_f32;
     E->dcfg.capture.channels = 2;  // Stereo input
+    E->dcfg.capture.pDeviceID = E->captureDeviceId;    // NULL = default
 
     E->dcfg.dataCallback = data_cb;
     E->dcfg.performanceProfile = ma_performance_profile_low_latency;
     E->dcfg.periodSizeInFrames = frames;
 
-    if (ma_device_init(NULL, &E->dcfg, &E->device) != MA_SUCCESS) return -1;
+    if (ma_device_init(&E->context, &E->dcfg, &E->device) != MA_SUCCESS){
+        fprintf(stderr, "Failed to initialize audio device\n");
+        ma_context_uninit(&E->context);
+        return -2;
+    }
+
+    // Log which devices we're using
+    fprintf(stderr, "Capture device: %s\n",
+            E->captureDeviceName[0] ? E->captureDeviceName : "(default)");
+    fprintf(stderr, "Playback device: %s\n",
+            E->playbackDeviceName[0] ? E->playbackDeviceName : "(default)");
+
     return 0;
 }
 
@@ -1231,6 +1431,9 @@ static void engine_uninit(Engine* E){
     for (int s=0;s<NUM_SLOTS;s++) slot_free(&E->slots[s]);
     recorder_free(&E->recorder);
     ma_device_uninit(&E->device);
+    ma_context_uninit(&E->context);
+    if (E->captureDeviceId) { free(E->captureDeviceId); E->captureDeviceId = NULL; }
+    if (E->playbackDeviceId) { free(E->playbackDeviceId); E->playbackDeviceId = NULL; }
 }
 
 // ---------- main ----------
