@@ -345,13 +345,14 @@ class App:
 
             y_cursor = cli_output_y + cli_output_height
 
-            # 4. CLI PROMPT (1 row)
-            self.cli_renderer.render_prompt(stdscr, y_cursor, w)
-            y_cursor += CLI_PROMPT_HEIGHT
-
             # 5. SPECIAL LANES: Events (lane 9) then Logs (lane 0) - between prompt and status
             # Calculate position from bottom up: status_line + special_lanes
             status_line_y = h - 1
+
+            # 4. CLI PROMPT (1 row) - positioned 4 lines above status for feedback area below
+            CLI_PROMPT_OFFSET = 4  # Lines between prompt and status/special lanes
+            cli_prompt_y = status_line_y - special_lanes_height - CLI_PROMPT_OFFSET
+            self.cli_renderer.render_prompt(stdscr, cli_prompt_y, w)
 
             # Calculate the maximum possible special lanes area (when both visible)
             max_special_lanes_height = 0
