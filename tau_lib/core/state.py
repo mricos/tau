@@ -9,6 +9,37 @@ from pathlib import Path
 import time
 
 
+# ========== Layout Configuration ==========
+
+@dataclass
+class LayoutConfig:
+    """
+    TUI layout constants - centralized for easy tuning and testing.
+
+    These control the visual structure of the terminal interface.
+    """
+    # Fixed heights
+    header_height: int = 2          # Header rows (transport info)
+    cli_prompt_height: int = 1      # CLI input line
+    cli_status_height: int = 1      # Bottom status line
+    cli_prompt_offset: int = 4      # Lines between prompt and status (feedback area)
+
+    # Dynamic CLI output
+    cli_output_min_height: int = 0  # Can collapse when data lanes need space
+    cli_output_max_height: int = 25 # Maximum lines for rich output
+
+    # Completion popup
+    completion_max_items: int = 8   # Max visible completion items
+    completion_preview_height: int = 3  # Preview pane lines
+
+    # Data viewport
+    min_data_viewport: int = 4      # Minimum rows for data lanes
+
+    # Terminal minimums
+    min_terminal_width: int = 80
+    min_terminal_height: int = 24
+
+
 # ========== Kernel Parameters ==========
 
 @dataclass
@@ -385,6 +416,7 @@ class AppState:
     markers: MarkerManager = field(default_factory=MarkerManager)
     display: DisplayState = field(default_factory=DisplayState)
     features: FeatureFlags = field(default_factory=FeatureFlags)
+    layout: LayoutConfig = field(default_factory=LayoutConfig)
 
     # File paths
     audio_input: str = None

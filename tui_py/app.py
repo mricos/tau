@@ -24,6 +24,8 @@ from tui_py.rendering.waveform import render_waveform_envelope, render_waveform_
 from tui_py.rendering.pinned import render_pinned_compact, render_pinned_expanded
 from tui_py.rendering.header import render_header
 from tui_py.rendering.cli import CLIRenderer
+from tui_py.layout import compute_layout, get_special_lanes_info, get_max_special_lanes_height
+from tui_py.input_handler import InputHandler
 from tau_lib.core.project import TauProject
 from tau_lib.integration.tscale_runner import TscaleRunner
 
@@ -101,6 +103,14 @@ class App:
         # Set up rich completion provider
         from tui_py.ui.completion import get_completions_rich
         self.cli.set_completion_rich_provider(get_completions_rich)
+
+        # Initialize input handler
+        self.input_handler = InputHandler(
+            state=self.state,
+            cli=self.cli,
+            execute_command=self._execute_command,
+            show_help=self._show_help,
+        )
 
         # Try to load local config
         local_config = self.project.load_local_config()
@@ -210,9 +220,8 @@ class App:
             self.cli.add_output(f"Audio loaded: {self.state.audio_input}", is_log=True, log_level="SUCCESS")
             self.cli.add_output(f"Duration: {self.state.transport.duration:.3f}s, Samples: {len(self.state.data_buffer)}", is_log=True, log_level="INFO")
 
-        # Minimum terminal size
-        MIN_WIDTH = 80
-        MIN_HEIGHT = 24
+        # Layout config reference for terminal size checks
+        lc = self.state.layout
 
         # Dirty flags for selective rendering
         need_full_redraw = True
@@ -221,9 +230,9 @@ class App:
         while True:
             # Check terminal size
             h, w = stdscr.getmaxyx()
-            if w < MIN_WIDTH or h < MIN_HEIGHT:
+            if w < lc.min_terminal_width or h < lc.min_terminal_height:
                 stdscr.erase()
-                msg = f"Terminal too small! Need {MIN_WIDTH}x{MIN_HEIGHT}, got {w}x{h}"
+                msg = f"Terminal too small! Need {lc.min_terminal_width}x{lc.min_terminal_height}, got {w}x{h}"
                 stdscr.addstr(0, 0, msg[:w-1])
                 stdscr.refresh()
                 time.sleep(0.1)
@@ -252,22 +261,18 @@ class App:
                 # Don't erase - just overwrite CLI sections
                 pass  # Will render CLI below
 
-            # === NEW LAYOUT (CLI OUTPUT GROWS UPWARD) ===
+            # === LAYOUT (CLI OUTPUT GROWS UPWARD) ===
             # Layout from top to bottom:
             # 1. HEADER (2 rows)
             # 2. DATA LANES (scrollable viewport - shrinks when CLI output grows)
-            # 3. CLI OUTPUT (grows upward, max 20 lines)
+            # 3. CLI OUTPUT (grows upward, max lines configurable)
             # 4. CLI PROMPT (1 row)
             # 5. EVENTS LANE (if visible)
             # 6. LOGS LANE (if visible)
             # 7. CLI STATUS (1 row at bottom)
 
-            HEADER_HEIGHT = 2
-            CLI_PROMPT_HEIGHT = 1
-            CLI_STATUS_HEIGHT = 1
-            # Dynamic CLI output height - use available space intelligently
-            CLI_OUTPUT_MIN_HEIGHT = 0   # Can collapse to nothing
-            CLI_OUTPUT_MAX_HEIGHT = 25  # Allow more lines for rich output
+            # Use layout config from state (allows runtime adjustment)
+            lc = self.state.layout
 
             # Calculate special lanes height (events + logs, or 0 if hidden)
             events_lane = self.state.lanes.get_lane(9)
@@ -279,16 +284,15 @@ class App:
                 special_lanes_height += logs_lane.get_height()
 
             # Calculate available space
-            MIN_DATA_VIEWPORT = 4  # Minimum rows for data lanes
-            fixed_height = HEADER_HEIGHT + CLI_PROMPT_HEIGHT + special_lanes_height + CLI_STATUS_HEIGHT
+            fixed_height = lc.header_height + lc.cli_prompt_height + special_lanes_height + lc.cli_status_height
             available_for_data_and_cli = h - fixed_height
 
             # Calculate CLI output height - either completions or normal output
             if self.cli.completions_visible:
                 # Show completion popup instead of CLI output
-                # Height: header (1) + items (max 8) + blank (1) + preview (3) = ~13 lines max
-                num_items = min(len(self.cli.completion_items), 8)
-                cli_output_height = 1 + num_items + 1 + 3  # header + items + blank + preview
+                # Height: header (1) + items + blank (1) + preview
+                num_items = min(len(self.cli.completion_items), lc.completion_max_items)
+                cli_output_height = 1 + num_items + 1 + lc.completion_preview_height
                 cli_output_lines = []
             else:
                 # Normal CLI output - dynamic sizing
@@ -296,9 +300,9 @@ class App:
                 num_output_lines = len(cli_output_lines)
 
                 # Calculate max CLI height based on available space
-                max_cli_for_this_screen = max(CLI_OUTPUT_MIN_HEIGHT,
-                                              available_for_data_and_cli - MIN_DATA_VIEWPORT)
-                desired_cli_height = min(num_output_lines, CLI_OUTPUT_MAX_HEIGHT)
+                max_cli_for_this_screen = max(lc.cli_output_min_height,
+                                              available_for_data_and_cli - lc.min_data_viewport)
+                desired_cli_height = min(num_output_lines, lc.cli_output_max_height)
                 cli_output_height = min(desired_cli_height, max_cli_for_this_screen)
 
                 # Truncate lines to what we'll actually display
@@ -308,30 +312,30 @@ class App:
                     cli_output_lines = []
 
             # Calculate data lanes viewport height (uses remaining space)
-            data_viewport_h = max(MIN_DATA_VIEWPORT, available_for_data_and_cli - cli_output_height)
+            data_viewport_h = max(lc.min_data_viewport, available_for_data_and_cli - cli_output_height)
 
             # Render sections (skip expensive parts in CLI-only mode)
             y_cursor = 0
 
             if not self.cli.mode or need_full_redraw:
                 # Full render when not in CLI mode or when redraw needed
-                # 1. HEADER (2 rows)
+                # 1. HEADER
                 render_header(stdscr, self.state, w)
-                y_cursor += HEADER_HEIGHT
+                y_cursor += lc.header_height
 
                 # 2. DATA LANES 1-8 (scrollable viewport) - EXPENSIVE
                 self._render_data_lanes(stdscr, y_cursor, data_viewport_h, w)
                 y_cursor += data_viewport_h
 
             # 3. CLI OUTPUT or COMPLETIONS (grows upward from prompt)
-            cli_output_y = HEADER_HEIGHT + data_viewport_h
+            cli_output_y = lc.header_height + data_viewport_h
 
             # Clear CLI output area to prevent ghosting (especially in CLI-only update mode)
             if cli_buffer_changed:
                 # Clear from MINIMUM possible cli_output_y (when popup is at max height)
                 # to the bottom of the CLI area to handle moving position
-                min_cli_output_y = HEADER_HEIGHT + MIN_DATA_VIEWPORT
-                max_clear_height = available_for_data_and_cli - MIN_DATA_VIEWPORT
+                min_cli_output_y = lc.header_height + lc.min_data_viewport
+                max_clear_height = available_for_data_and_cli - lc.min_data_viewport
                 for clear_y in range(min_cli_output_y, min(min_cli_output_y + max_clear_height, h)):
                     stdscr.move(clear_y, 0)
                     stdscr.clrtoeol()
@@ -349,9 +353,8 @@ class App:
             # Calculate position from bottom up: status_line + special_lanes
             status_line_y = h - 1
 
-            # 4. CLI PROMPT (1 row) - positioned 4 lines above status for feedback area below
-            CLI_PROMPT_OFFSET = 4  # Lines between prompt and status/special lanes
-            cli_prompt_y = status_line_y - special_lanes_height - CLI_PROMPT_OFFSET
+            # 4. CLI PROMPT (1 row) - positioned above status with feedback area below
+            cli_prompt_y = status_line_y - special_lanes_height - lc.cli_prompt_offset
             self.cli_renderer.render_prompt(stdscr, cli_prompt_y, w)
 
             # Calculate the maximum possible special lanes area (when both visible)
@@ -405,7 +408,7 @@ class App:
             if key == -1:
                 continue
 
-            if not self._handle_key(key):
+            if not self.input_handler.handle_key(key):
                 break  # Quit
 
     def _render_track_viewport(self, scr, y_start: int, viewport_h: int, width: int):
@@ -702,240 +705,6 @@ class App:
             lane_ind += f" │ {filename}"
 
         safe_addstr(scr, 1, 0, lane_ind[:width-1], curses.A_REVERSE)
-
-    def _handle_key(self, key) -> bool:
-        """
-        Handle keyboard input.
-
-        Returns:
-            True to continue, False to quit
-        """
-        # Help (only '?', not 'h')
-        if key == ord('?'):
-            self._show_help()
-            return True
-
-        # CLI mode
-        if self.cli.mode:
-            return self._handle_cli_key(key)
-
-        # Enter CLI mode
-        if key == ord(':'):
-            self.cli.enter_mode()
-            return True
-
-        # Quit (only 'Q' - Shift+Q, not lowercase 'q' to prevent accidental quit)
-        if key == ord('Q'):
-            return False
-
-        # Video popup toggle (Shift+V since lowercase 'v' is used for refractory adjustment)
-        if key == ord('V'):
-            if self.state.features.video_enabled and self.state.video_popup:
-                self.state.video_popup.toggle()
-                status = "visible" if self.state.video_popup.visible else "hidden"
-                self.cli.add_output(f"✓ Video popup: {status}")
-            elif not self.state.features.video_enabled:
-                self.cli.add_output("Video features disabled (--no-video)")
-            else:
-                self.cli.add_output("No video loaded (use :video_load <path>)")
-            return True
-
-        # Lane control: 1-9 toggle, Shift+1-9 cycle modes
-        # Shift+1-9 = ! @ # $ % ^ & * ( )
-        shift_map = {
-            ord('!'): 1, ord('@'): 2, ord('#'): 3, ord('$'): 4, ord('%'): 5,
-            ord('^'): 6, ord('&'): 7, ord('*'): 8, ord('('): 9, ord(')'): 0
-        }
-
-        if key in shift_map:
-            # Shift+number: cycle display mode
-            lane_id = shift_map[key]
-            msg = self.state.lanes.cycle_display_mode(lane_id)
-            self.cli.add_output(msg)
-            return True
-        elif ord('0') <= key <= ord('9'):
-            # Regular number: toggle visibility
-            lane_id = key - ord('0')
-            msg = self.state.lanes.toggle_visibility(lane_id)
-            self.cli.add_output(msg)
-            return True
-
-        # Scrolling controls
-        if key == curses.KEY_PPAGE:  # Page Up
-            self.state.lanes.scroll_up(5)
-            return True
-        elif key == curses.KEY_NPAGE:  # Page Down
-            self.state.lanes.scroll_down(5)
-            return True
-        elif key == curses.KEY_UP:
-            self.state.lanes.scroll_up(1)
-            return True
-        elif key == curses.KEY_DOWN:
-            self.state.lanes.scroll_down(1)
-            return True
-
-        # Map other keys to commands
-        cmd = self._key_to_command(key)
-        if cmd:
-            output = self._execute_command(cmd)
-            if output:
-                self.cli.add_output(output)
-
-        return True
-
-    def _handle_cli_key(self, key) -> bool:
-        """Handle key when in CLI mode."""
-        # ESC key - hide completions if visible, otherwise exit CLI
-        if key == 27:  # ESC
-            if self.cli.completions_visible:
-                self.cli.hide_completions()
-            else:
-                self.cli.exit_mode()
-
-        # Enter key - accept completion if visible, otherwise submit command
-        elif key in (10, curses.KEY_ENTER):  # Enter
-            if self.cli.completions_visible:
-                # Accept selected completion
-                self.cli.accept_completion()
-                # Update completions for new state
-                self.cli.update_completions_rich()
-            else:
-                # Submit command
-                cmd = self.cli.submit()
-                if cmd:
-                    output = self._execute_command(cmd)
-                    if output:
-                        # Split multi-line output and add each line separately
-                        for line in output.split('\n'):
-                            self.cli.add_output(line)
-                        if cmd == "clear":
-                            self.cli.clear_output()
-
-        # Arrow keys - navigate completions if visible, otherwise history/cursor
-        elif key == curses.KEY_UP:
-            if self.cli.completions_visible:
-                self.cli.select_prev_completion()
-            else:
-                self.cli.history_up()
-
-        elif key == curses.KEY_DOWN:
-            if self.cli.completions_visible:
-                self.cli.select_next_completion()
-            else:
-                self.cli.history_down()
-
-        # Left/Right - hierarchy navigation when completions visible, cursor move otherwise
-        elif key == curses.KEY_LEFT:
-            if self.cli.completions_visible and self.cli.current_category:
-                # Go back to category list
-                self.cli.drill_out_of_category()
-            else:
-                self.cli.move_cursor(-1)
-                self.cli.update_completions_rich()
-
-        elif key == curses.KEY_RIGHT:
-            if self.cli.completions_visible:
-                # Drill into category or accept command
-                self.cli.drill_into_category()
-            else:
-                self.cli.move_cursor(1)
-                self.cli.update_completions_rich()
-
-        # Tab key - accept selected completion if popup is visible
-        elif key == ord('\t'):  # Tab
-            if self.cli.completions_visible:
-                # Use new rich completion system - accept selected item
-                self.cli.accept_completion()
-                # Update completions after accepting (for next word/argument)
-                self.cli.update_completions_rich()
-            # If no completions visible, Tab does nothing (no popup trigger)
-
-        # Home/End keys
-        elif key == curses.KEY_HOME:
-            self.cli.cursor_home()
-            self.cli.update_completions_rich()
-
-        elif key == curses.KEY_END:
-            self.cli.cursor_end()
-            self.cli.update_completions_rich()
-
-        # Backspace
-        elif key in (curses.KEY_BACKSPACE, 127, 8):
-            self.cli.backspace()
-            self.cli.update_completions_rich()  # Real-time filtering
-
-        # Printable characters
-        elif 32 <= key <= 126:  # Printable
-            # Special case: if input buffer is empty, handle lane keys
-            if len(self.cli.input_buffer) == 0:
-                # Shift+number: cycle display mode
-                shift_map = {
-                    ord('!'): 1, ord('@'): 2, ord('#'): 3, ord('$'): 4, ord('%'): 5,
-                    ord('^'): 6, ord('&'): 7, ord('*'): 8, ord('('): 9, ord(')'): 0
-                }
-                if key in shift_map:
-                    lane_id = shift_map[key]
-                    msg = self.state.lanes.cycle_display_mode(lane_id)
-                    self.cli.add_output(msg)
-                    # Don't add to input buffer - consumed by lane cycle
-                # Regular number: toggle visibility
-                elif ord('0') <= key <= ord('9'):
-                    lane_id = key - ord('0')
-                    msg = self.state.lanes.toggle_visibility(lane_id)
-                    self.cli.add_output(msg)
-                    # Don't add to input buffer - consumed by lane toggle
-                else:
-                    # Normal character input
-                    self.cli.insert_char(chr(key))
-                    self.cli.update_completions_rich()  # Real-time filtering
-            else:
-                # Normal character input
-                self.cli.insert_char(chr(key))
-                self.cli.update_completions_rich()  # Real-time filtering
-
-        return True
-
-    def _key_to_command(self, key) -> str:
-        """Map keyboard shortcut to CLI command."""
-        mapping = {
-            # Transport
-            ord(' '): 'toggle_play',
-            curses.KEY_LEFT: 'scrub_pct -1',
-            curses.KEY_RIGHT: 'scrub_pct 1',
-            curses.KEY_SLEFT: 'scrub_pct -10',
-            curses.KEY_SRIGHT: 'scrub_pct 10',
-            curses.KEY_HOME: 'home',
-            curses.KEY_END: 'end',
-
-            # Zoom
-            ord('<'): 'zoom_in',
-            ord(','): 'zoom_in',
-            ord('>'): 'zoom_out',
-            ord('.'): 'zoom_out',
-
-            # Display
-            ord('o'): 'toggle_mode',
-
-            # Reprocess
-            ord('K'): 'reprocess',
-
-            # Markers
-            ord('m'): f'mark marker_{int(time.time())}',
-            ord('`'): 'next_marker',
-            ord('~'): 'prev_marker',
-
-            # Parameters (quick adjust)
-            ord('z'): 'tau_a_semitone -1',
-            ord('Z'): 'tau_a_semitone 1',
-            ord('x'): 'tau_r_semitone -1',
-            ord('X'): 'tau_r_semitone 1',
-            ord('c'): 'thr ' + str(max(0.5, self.state.kernel.threshold - 0.5)),
-            ord('C'): 'thr ' + str(min(20.0, self.state.kernel.threshold + 0.5)),
-            ord('v'): 'ref ' + str(max(0.001, self.state.kernel.refractory - 0.005)),
-            ord('V'): 'ref ' + str(min(1.0, self.state.kernel.refractory + 0.005)),
-        }
-
-        return mapping.get(key)
 
     def _execute_command(self, cmd_str: str) -> str:
         """

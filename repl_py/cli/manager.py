@@ -6,7 +6,103 @@ Supports tab-completion.
 
 import time
 from collections import deque
-from typing import Optional, List, Callable
+from dataclasses import dataclass, field
+from typing import Optional, List, Callable, Any
+
+
+@dataclass
+class CompletionState:
+    """
+    Encapsulates all completion popup state.
+
+    Separating this makes the completion system testable in isolation
+    and clarifies what state is completion-specific vs. CLI-specific.
+    """
+    items: List[Any] = field(default_factory=list)  # List of CompletionItem objects
+    visible: bool = False                            # Whether popup is visible
+    selected_index: int = 0                          # Currently selected item
+    current_category: Optional[str] = None           # Category filter (hierarchical nav)
+    provider: Optional[Callable] = None              # Provider function for completions
+
+    def update(self, buffer: str):
+        """
+        Update completions based on buffer content.
+
+        Args:
+            buffer: Current input buffer up to cursor
+        """
+        if not self.provider:
+            return
+
+        # Get rich completion items (pass category filter)
+        self.items = self.provider(buffer, self.current_category)
+
+        # Show popup if we have 1+ completions
+        if len(self.items) >= 1:
+            self.visible = True
+            # Reset selection if out of bounds
+            if self.selected_index >= len(self.items):
+                self.selected_index = 0
+        else:
+            self.visible = False
+
+    def select_next(self):
+        """Move selection down (wraps)."""
+        if not self.items:
+            return
+        self.selected_index = (self.selected_index + 1) % len(self.items)
+
+    def select_prev(self):
+        """Move selection up (wraps)."""
+        if not self.items:
+            return
+        self.selected_index = (self.selected_index - 1) % len(self.items)
+
+    def get_selected(self) -> Optional[Any]:
+        """Get currently selected completion item."""
+        if not self.items or self.selected_index < 0:
+            return None
+        if self.selected_index < len(self.items):
+            return self.items[self.selected_index]
+        return None
+
+    def hide(self):
+        """Hide completion popup and reset state."""
+        self.visible = False
+        self.items = []
+        self.selected_index = 0
+        self.current_category = None
+
+    def drill_into(self) -> bool:
+        """
+        Drill into selected category (→ key).
+
+        Returns:
+            True if drilled into a category or accepted a command
+        """
+        item = self.get_selected()
+        if not item:
+            return False
+
+        if item.type == "category":
+            self.current_category = item.text
+            self.selected_index = 0
+            return True  # Caller should call update() after this
+        else:
+            return False  # Caller should accept completion
+
+    def drill_out(self) -> bool:
+        """
+        Go back to category list (← key).
+
+        Returns:
+            True if we were in a category and went back
+        """
+        if self.current_category is not None:
+            self.current_category = None
+            self.selected_index = 0
+            return True  # Caller should call update() after this
+        return False
 
 
 class CLIManager:
@@ -28,14 +124,30 @@ class CLIManager:
         self.event_callback: Optional[Callable] = None  # Callback to record events
         self.log_callback: Optional[Callable] = None  # Callback to record logs
 
-        # Rich completion state
-        self.completion_items = []  # List of CompletionItem objects
-        self.completions_visible = False  # Whether popup is visible
-        self.selected_index = 0  # Currently selected item in popup
-        self.completion_rich_provider: Optional[Callable] = None  # Provider for rich completions
+        # Completion state (encapsulated for testability)
+        self._completion = CompletionState()
 
-        # Hierarchical navigation state
-        self.current_category: Optional[str] = None  # None = show categories, str = show commands in category
+    # ========== COMPLETION PROPERTY ACCESSORS (for backwards compat) ==========
+
+    @property
+    def completion_items(self) -> List[Any]:
+        """Access completion items list."""
+        return self._completion.items
+
+    @property
+    def completions_visible(self) -> bool:
+        """Check if completion popup is visible."""
+        return self._completion.visible
+
+    @property
+    def selected_index(self) -> int:
+        """Get selected completion index."""
+        return self._completion.selected_index
+
+    @property
+    def current_category(self) -> Optional[str]:
+        """Get current category filter."""
+        return self._completion.current_category
 
     def enter_mode(self):
         """Enter CLI input mode."""
@@ -195,63 +307,35 @@ class CLIManager:
         """
         self.log_callback = callback
 
-    # ========== RICH COMPLETION METHODS (NEW SYSTEM) ==========
+    # ========== RICH COMPLETION METHODS ==========
 
     def set_completion_rich_provider(self, provider: Callable):
         """Set provider function for rich completions."""
-        self.completion_rich_provider = provider
+        self._completion.provider = provider
 
     def update_completions_rich(self):
         """
         Update rich completion items based on current buffer.
         Called on every keystroke for real-time filtering.
         """
-        if not self.completion_rich_provider:
-            return
-
-        # Get buffer up to cursor
         buffer = self.input_buffer[:self.cursor_pos]
-
-        # Get rich completion items (pass category filter)
-        self.completion_items = self.completion_rich_provider(buffer, self.current_category)
-
-        # Show popup if we have 1+ completions
-        if len(self.completion_items) >= 1:
-            self.completions_visible = True
-            # Reset selection to top if out of bounds
-            if self.selected_index >= len(self.completion_items):
-                self.selected_index = 0
-        else:
-            # No matches
-            self.completions_visible = False
+        self._completion.update(buffer)
 
     def select_next_completion(self):
         """Move selection down in completion list (wraps)."""
-        if not self.completion_items:
-            return
-
-        self.selected_index = (self.selected_index + 1) % len(self.completion_items)
+        self._completion.select_next()
 
     def select_prev_completion(self):
         """Move selection up in completion list (wraps)."""
-        if not self.completion_items:
-            return
+        self._completion.select_prev()
 
-        self.selected_index = (self.selected_index - 1) % len(self.completion_items)
-
-    def get_selected_completion(self):
+    def get_selected_completion(self) -> Optional[Any]:
         """Get currently selected completion item."""
-        if not self.completion_items or self.selected_index < 0:
-            return None
-
-        if self.selected_index < len(self.completion_items):
-            return self.completion_items[self.selected_index]
-
-        return None
+        return self._completion.get_selected()
 
     def accept_completion(self):
         """Insert selected completion into buffer."""
-        item = self.get_selected_completion()
+        item = self._completion.get_selected()
         if not item:
             return
 
@@ -265,53 +349,39 @@ class CLIManager:
             self.cursor_pos = len(self.input_buffer)
         else:
             # Replacing argument
-            # Find start of last word
             last_space = buffer.rfind(' ')
             prefix = buffer[:last_space + 1] if last_space >= 0 else ''
             suffix = self.input_buffer[self.cursor_pos:]
-
             self.input_buffer = prefix + item.text + ' ' + suffix
             self.cursor_pos = len(prefix + item.text + ' ')
 
-        # Hide completions after accepting
-        self.hide_completions()
+        self._completion.hide()
 
     def hide_completions(self):
         """Hide completion popup."""
-        self.completions_visible = False
-        self.completion_items = []
-        self.selected_index = 0
-        self.current_category = None
+        self._completion.hide()
 
-    def drill_into_category(self):
+    def drill_into_category(self) -> bool:
         """
         Drill into selected category (→ key).
         If on a category item, show commands in that category.
         If on a command item, accept it.
         """
-        item = self.get_selected_completion()
-        if not item:
-            return False
-
-        if item.type == "category":
-            # Drill into category
-            self.current_category = item.text
-            self.selected_index = 0
+        if self._completion.drill_into():
+            # Drilled into category - update completions
             self.update_completions_rich()
             return True
         else:
-            # On a command - accept it
+            # Not a category - accept completion
             self.accept_completion()
             return True
 
-    def drill_out_of_category(self):
+    def drill_out_of_category(self) -> bool:
         """
         Go back to category list (← key).
         Returns True if we were in a category and went back.
         """
-        if self.current_category is not None:
-            self.current_category = None
-            self.selected_index = 0
+        if self._completion.drill_out():
             self.update_completions_rich()
             return True
         return False
