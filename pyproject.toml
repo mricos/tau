@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tau"
+version = "0.1.0"
+description = "Terminal Audio Workstation"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "mricos" }]
+dependencies = [
+    "python-osc>=1.8.0",
+]
+
+[project.optional-dependencies]
+video = [
+    "opencv-python>=4.8.0",
+]
+dev = [
+    "pytest>=7.0",
+    "build",
+    "pyinstaller>=6.0",
+]
+
+[project.scripts]
+tau = "repl_py.main:main"
+
+[tool.setuptools.packages.find]
+include = ["tau_lib*", "repl_py*", "tui_py*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.md"]

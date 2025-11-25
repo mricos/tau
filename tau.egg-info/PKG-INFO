@@ -1,3 +1,18 @@
+Metadata-Version: 2.4
+Name: tau
+Version: 0.1.0
+Summary: Terminal Audio Workstation
+Author: mricos
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: python-osc>=1.8.0
+Provides-Extra: video
+Requires-Dist: opencv-python>=4.8.0; extra == "video"
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+Requires-Dist: build; extra == "dev"
+Requires-Dist: pyinstaller>=6.0; extra == "dev"
+
 # tau - Terminal Audio Workstation
 
 A modular audio workstation with a real-time C engine and Python interface.

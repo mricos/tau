@@ -1,0 +1,2 @@
+[console_scripts]
+tau = repl_py.main:main
