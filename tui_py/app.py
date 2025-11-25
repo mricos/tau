@@ -824,14 +824,22 @@ class App:
             else:
                 self.cli.history_down()
 
-        # Left/Right always move cursor (don't navigate completions)
+        # Left/Right - hierarchy navigation when completions visible, cursor move otherwise
         elif key == curses.KEY_LEFT:
-            self.cli.move_cursor(-1)
-            self.cli.update_completions_rich()  # Update after cursor move
+            if self.cli.completions_visible and self.cli.current_category:
+                # Go back to category list
+                self.cli.drill_out_of_category()
+            else:
+                self.cli.move_cursor(-1)
+                self.cli.update_completions_rich()
 
         elif key == curses.KEY_RIGHT:
-            self.cli.move_cursor(1)
-            self.cli.update_completions_rich()  # Update after cursor move
+            if self.cli.completions_visible:
+                # Drill into category or accept command
+                self.cli.drill_into_category()
+            else:
+                self.cli.move_cursor(1)
+                self.cli.update_completions_rich()
 
         # Tab key - accept selected completion if popup is visible
         elif key == ord('\t'):  # Tab

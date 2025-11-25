@@ -17,15 +17,17 @@ class CompletionItem:
     category: str                # Command category name
     color: int                   # Color pair index for display
     full_help: List[str]        # Full help text for preview pane
-    type: str = "command"       # "command", "argument", "path"
+    type: str = "command"       # "command", "argument", "path", "category"
+    command_count: int = 0       # Number of commands (for category items)
 
 
-def get_completions_rich(buffer: str) -> List[CompletionItem]:
+def get_completions_rich(buffer: str, category_filter: Optional[str] = None) -> List[CompletionItem]:
     """
     Get rich completion items for current buffer.
 
     Args:
         buffer: Current input buffer before cursor
+        category_filter: If set, only show commands from this category
 
     Returns:
         List of CompletionItem objects with full metadata
@@ -35,7 +37,13 @@ def get_completions_rich(buffer: str) -> List[CompletionItem]:
     if not parts or (len(parts) == 1 and not buffer.endswith(' ')):
         # Completing command name
         prefix = parts[0] if parts else ""
-        return _get_command_completions(prefix)
+
+        # If no category filter and no/short prefix, show categories first
+        if category_filter is None and len(prefix) <= 1:
+            return _get_category_completions(prefix)
+        else:
+            # Show commands (filtered by category if set)
+            return _get_command_completions(prefix, category_filter)
     else:
         # Completing command argument
         cmd_name = parts[0]
@@ -79,7 +87,50 @@ def get_completions_rich(buffer: str) -> List[CompletionItem]:
         return items
 
 
-def _get_command_completions(prefix: str) -> List[CompletionItem]:
+def _get_category_completions(prefix: str) -> List[CompletionItem]:
+    """Get category items for hierarchical navigation."""
+    items = []
+
+    # Count commands per category
+    category_counts = {}
+    for cat in CommandCategory:
+        category_counts[cat.category_name] = 0
+
+    for name in COMMAND_REGISTRY.get_command_names(""):
+        cmd_def = COMMAND_REGISTRY.get(name)
+        if cmd_def:
+            cat_name = cmd_def.category.category_name
+            category_counts[cat_name] = category_counts.get(cat_name, 0) + 1
+
+    # Create category items
+    for cat in CommandCategory:
+        cat_name = cat.category_name
+        count = category_counts.get(cat_name, 0)
+
+        # Filter by prefix if provided
+        if prefix and not cat_name.lower().startswith(prefix.lower()):
+            continue
+
+        if count > 0:
+            items.append(CompletionItem(
+                text=cat_name,
+                description=f"{count} commands →",
+                category=cat_name,
+                color=cat.color,
+                full_help=[
+                    f"── {cat_name.upper()} ──",
+                    "",
+                    f"Contains {count} commands.",
+                    "Press → to browse commands."
+                ],
+                type="category",
+                command_count=count
+            ))
+
+    return items
+
+
+def _get_command_completions(prefix: str, category_filter: Optional[str] = None) -> List[CompletionItem]:
     """Get command name completions with rich metadata."""
     items = []
 
@@ -89,6 +140,10 @@ def _get_command_completions(prefix: str) -> List[CompletionItem]:
     for name in cmd_names:
         cmd_def = COMMAND_REGISTRY.get(name)
         if not cmd_def:
+            continue
+
+        # Filter by category if specified
+        if category_filter and cmd_def.category.category_name != category_filter:
             continue
 
         # Truncate description to 40 chars for 2-column layout

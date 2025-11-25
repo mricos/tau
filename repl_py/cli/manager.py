@@ -34,6 +34,9 @@ class CLIManager:
         self.selected_index = 0  # Currently selected item in popup
         self.completion_rich_provider: Optional[Callable] = None  # Provider for rich completions
 
+        # Hierarchical navigation state
+        self.current_category: Optional[str] = None  # None = show categories, str = show commands in category
+
     def enter_mode(self):
         """Enter CLI input mode."""
         self.mode = True
@@ -209,18 +212,15 @@ class CLIManager:
         # Get buffer up to cursor
         buffer = self.input_buffer[:self.cursor_pos]
 
-        # Get rich completion items
-        self.completion_items = self.completion_rich_provider(buffer)
+        # Get rich completion items (pass category filter)
+        self.completion_items = self.completion_rich_provider(buffer, self.current_category)
 
-        # Show popup if we have 2+ completions
-        if len(self.completion_items) >= 2:
+        # Show popup if we have 1+ completions
+        if len(self.completion_items) >= 1:
             self.completions_visible = True
-            # Reset selection to top
+            # Reset selection to top if out of bounds
             if self.selected_index >= len(self.completion_items):
                 self.selected_index = 0
-        elif len(self.completion_items) == 1:
-            # Single match - auto-complete (optional behavior)
-            self.completions_visible = False
         else:
             # No matches
             self.completions_visible = False
@@ -281,3 +281,37 @@ class CLIManager:
         self.completions_visible = False
         self.completion_items = []
         self.selected_index = 0
+        self.current_category = None
+
+    def drill_into_category(self):
+        """
+        Drill into selected category (→ key).
+        If on a category item, show commands in that category.
+        If on a command item, accept it.
+        """
+        item = self.get_selected_completion()
+        if not item:
+            return False
+
+        if item.type == "category":
+            # Drill into category
+            self.current_category = item.text
+            self.selected_index = 0
+            self.update_completions_rich()
+            return True
+        else:
+            # On a command - accept it
+            self.accept_completion()
+            return True
+
+    def drill_out_of_category(self):
+        """
+        Go back to category list (← key).
+        Returns True if we were in a category and went back.
+        """
+        if self.current_category is not None:
+            self.current_category = None
+            self.selected_index = 0
+            self.update_completions_rich()
+            return True
+        return False

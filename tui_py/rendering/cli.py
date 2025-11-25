@@ -183,13 +183,24 @@ class CLIRenderer:
 
         total_height = header_height + num_items + preview_height
 
-        # Render header with scroll indicator
+        # Render header with category context and scroll indicator
         scr.move(y_start, 0)
         scr.clrtoeol()
-        if total_items > max_visible_items:
-            header = f" Matching commands ({len(items)}): [{start_idx+1}-{start_idx+num_items} of {total_items}]"
+
+        # Check if we're in a category
+        current_cat = cli.current_category
+        if current_cat:
+            # In category - show back navigation hint
+            if total_items > max_visible_items:
+                header = f" ← {current_cat.upper()} ({len(items)}): [{start_idx+1}-{start_idx+num_items} of {total_items}]"
+            else:
+                header = f" ← {current_cat.upper()} ({len(items)} commands)"
         else:
-            header = f" Matching commands ({len(items)}): "
+            # At category level
+            if total_items > max_visible_items:
+                header = f" Categories ({len(items)}): [{start_idx+1}-{start_idx+num_items} of {total_items}]"
+            else:
+                header = f" Categories ({len(items)}): [↑↓ nav, → expand]"
         safe_addstr(scr, y_start, 1, header, curses.A_BOLD | curses.color_pair(COLOR_STATUS))
         y = y_start + 1
 
