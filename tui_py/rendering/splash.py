@@ -4,6 +4,8 @@ Shows immediately on startup, displays loading progress as components initialize
 """
 
 import curses
+import math
+import random
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional, Callable
@@ -27,6 +29,176 @@ LOGO_MEDIUM = [
     "     ╚═╝   ╚═╝  ╚═╝ ╚═════╝   ",
 ]
 
+# T to Tau (τ) morphing frames for animation
+# Frame 0: full T (default)
+# Frame N: tau symbol (τ shape like 7)
+# Tab key triggers morph as easter egg
+TAU_MORPH_FRAMES = [
+    # Frame 0: full T (matches LOGO_MEDIUM T)
+    [
+        "  ████████╗ ",
+        "  ╚══██╔══╝ ",
+        "     ██║    ",
+        "     ██║    ",
+        "     ██║    ",
+        "     ╚═╝    ",
+    ],
+    # Frame 1: T loosening
+    [
+        "  ████████╗ ",
+        "     ██╔══╝ ",
+        "     ██║    ",
+        "     ██║    ",
+        "     ██║    ",
+        "     ╚═╝    ",
+    ],
+    # Frame 2: stem starting to angle
+    [
+        "  ████████╗ ",
+        "     ██╔╝   ",
+        "     ██║    ",
+        "     ██║    ",
+        "    ██╔╝    ",
+        "    ╚═╝     ",
+    ],
+    # Frame 3: more angled
+    [
+        "  ████████╗ ",
+        "      ██╔╝  ",
+        "     ██╔╝   ",
+        "     ██║    ",
+        "    ██╔╝    ",
+        "    ╚═╝     ",
+    ],
+    # Frame 4: tau shape
+    [
+        "  ████████╗ ",
+        "      ██╔╝  ",
+        "     ██╔╝   ",
+        "    ██╔╝    ",
+        "   ██╔╝     ",
+        "   ╚═╝      ",
+    ],
+    # Frame 5: tau (τ) - stem reaches closer toward A
+    [
+        "  ████████╗ ",
+        "       ██╔╝ ",
+        "      ██╔╝  ",
+        "     ██╔╝   ",
+        "    ██╔╝    ",
+        "   ╚═╝      ",
+    ],
+]
+
+# A and U remain static during morph
+LOGO_AU = [
+    " █████╗ ██╗   ██╗  ",
+    "██╔══██╗██║   ██║  ",
+    "███████║██║   ██║  ",
+    "██╔══██║██║   ██║  ",
+    "██║  ██║╚██████╔╝  ",
+    "╚═╝  ╚═╝ ╚═════╝   ",
+]
+
+
+@dataclass
+class SplashAnimationConfig:
+    """Configuration for splash screen animations."""
+    # Progress rate limiting
+    progress_max_rate: float = 0.10      # Max 10% progress per tick
+    progress_tick_ms: int = 200          # Tick interval in ms
+    progress_target: float = 0.70        # Target progress before steps complete
+
+    # Logo morph animation (Tab easter egg)
+    morph_enabled: bool = True
+    morph_duration_ms: int = 800         # Total morph duration
+    morph_hold_end_ms: int = 1000        # Hold at end before returning
+
+    # General timing
+    fade_duration: float = 0.5           # Fade out duration in seconds
+    step_display_interval: float = 0.2   # Time between step displays
+
+    # Visual effects
+    shimmer_enabled: bool = True
+    shimmer_wavelength: float = 8.0
+    shimmer_speed: float = 0.5
+
+
+@dataclass
+class SplashAnimationState:
+    """Runtime state for splash animations."""
+    # Progress animation
+    display_progress: float = 0.0        # What's shown (smoothed)
+    target_progress: float = 0.0         # What we're animating toward
+    last_progress_tick: float = 0.0
+
+    # Logo morph (Tab easter egg: toggle T <-> tau)
+    morph_active: bool = False           # Is morph animation running
+    morph_start_time: float = 0.0
+    morph_target: str = "t"              # Current target state: "t" or "tau"
+
+    # General
+    frame_count: int = 0
+    start_time: float = field(default_factory=time.time)
+
+    def trigger_morph(self):
+        """Toggle between T and tau states (Tab easter egg)."""
+        # If not animating, start animation to opposite state
+        if not self.morph_active:
+            self.morph_active = True
+            self.morph_start_time = time.time()
+            # Toggle target
+            self.morph_target = "tau" if self.morph_target == "t" else "t"
+
+    def get_morph_frame(self, config: SplashAnimationConfig) -> int:
+        """Calculate current morph frame based on timing."""
+        total_frames = len(TAU_MORPH_FRAMES)
+
+        if not self.morph_active:
+            # Return final frame based on current state
+            return 0 if self.morph_target == "t" else total_frames - 1
+
+        now = time.time()
+        elapsed = (now - self.morph_start_time) * 1000  # ms
+        progress = min(1.0, elapsed / config.morph_duration_ms)
+
+        if self.morph_target == "tau":
+            # Morphing T -> tau (frame 0 -> frame N)
+            frame = int(progress * (total_frames - 1))
+        else:
+            # Morphing tau -> T (frame N -> frame 0)
+            frame = total_frames - 1 - int(progress * (total_frames - 1))
+
+        frame = max(0, min(total_frames - 1, frame))
+
+        if progress >= 1.0:
+            self.morph_active = False
+
+        return frame
+
+    def update_progress(self, config: SplashAnimationConfig) -> bool:
+        """Update display progress with rate limiting. Returns True if changed."""
+        now = time.time()
+        elapsed_ms = (now - self.last_progress_tick) * 1000
+
+        if elapsed_ms < config.progress_tick_ms:
+            return False
+
+        self.last_progress_tick = now
+
+        if self.display_progress < self.target_progress:
+            # Rate limit the progress increase
+            max_increase = config.progress_max_rate
+            diff = self.target_progress - self.display_progress
+            increase = min(diff, max_increase)
+            self.display_progress += increase
+            return True
+        return False
+
+    def tick(self):
+        """Advance frame counter."""
+        self.frame_count += 1
+
 TAGLINE = "Terminal Audio Workstation"
 SUBTITLE = "Neural Network Kernel Tuning"
 
@@ -42,6 +214,25 @@ QUICK_TIPS = [
 LOADING_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
 
+def wave_shimmer(text: str, frame: int, wavelength: float = 8.0, speed: float = 0.5):
+    """
+    Generate per-character brightness for a shimmer wave effect.
+    Returns list of (char, is_bright) tuples.
+
+    The wave travels through the text, making characters bright/dim
+    in a smooth ripple pattern.
+    """
+    result = []
+    phase = frame * speed
+    for i, char in enumerate(text):
+        # Sine wave determines brightness, shifted by character position
+        wave_val = math.sin((i / wavelength) * 2 * math.pi - phase)
+        # Map sine (-1 to 1) to brightness threshold
+        is_bright = wave_val > 0.0
+        result.append((char, is_bright))
+    return result
+
+
 # Color scheme
 COLOR_LOGO = 4          # Orange (MODE palette)
 COLOR_TAGLINE = 9       # Green (SUCCESS)
@@ -53,18 +244,65 @@ COLOR_STEP_ACTIVE = 9   # Green for current step
 
 
 @dataclass
+class StepQueue:
+    """Async-friendly step display with rate limiting."""
+    steps: List[str] = field(default_factory=list)
+    display_index: int = 0  # How many steps are visible
+    last_display_time: float = 0.0
+    min_interval: float = 0.2  # 200ms between steps
+
+    def add(self, message: str):
+        """Add step to queue (non-blocking)."""
+        self.steps.append(message)
+
+    def tick(self) -> bool:
+        """Call from render loop. Returns True if display updated."""
+        if self.display_index >= len(self.steps):
+            return False
+        now = time.time()
+        if now - self.last_display_time >= self.min_interval:
+            self.display_index += 1
+            self.last_display_time = now
+            return True
+        return False
+
+    def visible_steps(self) -> List[str]:
+        """Get steps to display (completed ones)."""
+        # Show all but the last one as "completed", last visible one is "current"
+        if self.display_index == 0:
+            return []
+        return self.steps[:self.display_index - 1]
+
+    def current_step(self) -> Optional[str]:
+        """Get the current step being processed."""
+        if self.display_index == 0 or self.display_index > len(self.steps):
+            return None
+        return self.steps[self.display_index - 1]
+
+    def all_visible(self) -> bool:
+        """Check if all queued steps have been displayed."""
+        return self.display_index >= len(self.steps)
+
+
+@dataclass
 class SplashState:
     """State for splash screen."""
     visible: bool = True  # Start visible by default
     loading_progress: float = 0.0
     loading_message: str = "Starting..."
-    steps_completed: List[str] = field(default_factory=list)
-    current_step: str = ""
     animation_frame: int = 0
     current_tip: int = 0
     ready: bool = False
+    ready_queued: bool = False  # Ready has been requested but not yet displayed
     error: Optional[str] = None
     ready_time: Optional[float] = None
+
+    # Step queue for async display
+    step_queue: StepQueue = field(default_factory=StepQueue)
+
+    # Animation system
+    anim_config: SplashAnimationConfig = field(default_factory=SplashAnimationConfig)
+    anim_state: SplashAnimationState = field(default_factory=SplashAnimationState)
 
     # Customization
     logo_style: str = "medium"
@@ -85,6 +323,9 @@ class SplashState:
     tips_page_index: int = 0      # Current tip in tips page
     require_enter: bool = True    # Require Enter key (not any key)
 
+    # Random tip on splash (pick one at init)
+    random_tip_index: int = -1    # -1 means not initialized
+
     def should_dismiss(self) -> bool:
         """Check if splash should auto-dismiss."""
         if not self.auto_dismiss or not self.ready:
@@ -98,49 +339,40 @@ class SplashState:
         self.visible = True
         self.loading_progress = 0.0
         self.loading_message = "Starting..."
-        self.steps_completed = []
-        self.current_step = ""
+        self.step_queue = StepQueue()
         self.ready = False
+        self.ready_queued = False
         self.error = None
+        # Reset animation state
+        self.anim_state = SplashAnimationState()
+        self.anim_state.morph_start_time = time.time()
+        # Pick a random tip for this splash
+        if self.tips:
+            self.random_tip_index = random.randint(0, len(self.tips) - 1)
 
     def hide(self):
         """Hide splash screen."""
         self.visible = False
 
-    # Maximum steps to keep (prevent unbounded growth)
-    MAX_STEPS = 20
-
     def set_step(self, message: str, progress: float = None):
-        """Set current loading step."""
-        if self.current_step:
-            self.steps_completed.append(self.current_step)
-            # Trim to prevent unbounded growth
-            if len(self.steps_completed) > self.MAX_STEPS:
-                self.steps_completed = self.steps_completed[-self.MAX_STEPS:]
-        self.current_step = message
+        """Queue a loading step (non-blocking)."""
+        self.step_queue.add(message)
         self.loading_message = message
         if progress is not None:
-            self.loading_progress = min(1.0, max(0.0, progress))
-
-    def complete_step(self, message: str = None):
-        """Mark current step complete and optionally start new one."""
-        if self.current_step:
-            self.steps_completed.append(self.current_step)
-        if message:
-            self.current_step = message
-            self.loading_message = message
-        else:
-            self.current_step = ""
+            # Set target progress - actual display will animate toward it
+            target = min(1.0, max(0.0, progress))
+            # Cap at configured target until ready
+            if not self.ready_queued:
+                target = min(target, self.anim_config.progress_target)
+            self.anim_state.target_progress = target
+            self.loading_progress = target  # Keep for compatibility
 
     def set_ready(self):
-        """Mark loading complete."""
-        if self.current_step:
-            self.steps_completed.append(self.current_step)
-        self.current_step = ""
+        """Queue ready state (non-blocking). Actual ready triggers after all steps shown."""
+        self.ready_queued = True
+        self.anim_state.target_progress = 1.0
         self.loading_progress = 1.0
         self.loading_message = "Ready!"
-        self.ready = True
-        self.ready_time = time.time()
 
     def set_error(self, error: str):
         """Set error state."""
@@ -148,11 +380,49 @@ class SplashState:
         self.loading_message = f"Error: {error}"
 
     def tick(self):
-        """Advance animation frame."""
+        """Advance animation frame and step queue."""
         self.animation_frame = (self.animation_frame + 1) % len(LOADING_FRAMES)
-        # Rotate tips occasionally
-        if self.animation_frame == 0:
-            self.current_tip = (self.current_tip + 1) % len(self.tips)
+        # Advance step queue display
+        self.step_queue.tick()
+        # Update animated progress
+        self.anim_state.update_progress(self.anim_config)
+        self.anim_state.tick()
+        # If ready was queued and all steps are visible, trigger actual ready
+        if self.ready_queued and self.step_queue.all_visible() and not self.ready:
+            self.ready = True
+            self.ready_time = time.time()
+
+    def get_display_progress(self) -> float:
+        """Get the smoothly animated progress value for display."""
+        return self.anim_state.display_progress
+
+    def get_logo_frame(self) -> List[str]:
+        """Get current logo frame (morphing T or static)."""
+        if self.anim_config.morph_enabled:
+            frame_idx = self.anim_state.get_morph_frame(self.anim_config)
+            t_frame = TAU_MORPH_FRAMES[frame_idx]
+            # Combine morphing T with static AU
+            combined = []
+            for i, t_line in enumerate(t_frame):
+                combined.append(t_line + LOGO_AU[i])
+            return combined
+        return LOGO_MEDIUM
+
+    def trigger_tau_morph(self):
+        """Trigger the T -> tau -> T easter egg animation (Tab key)."""
+        self.anim_state.trigger_morph()
+
+    def steps_completed(self) -> List[str]:
+        """Get completed steps for display."""
+        return self.step_queue.visible_steps()
+
+    def current_step(self) -> Optional[str]:
+        """Get current step for display."""
+        return self.step_queue.current_step()
+
+    def tick_only_animation(self):
+        """Advance only animation frame (for tips page)."""
+        self.animation_frame = (self.animation_frame + 1) % len(LOADING_FRAMES)
 
     def init_startup_tips(self, show_tips: bool = True, tips_count: int = 3, require_enter: bool = True):
         """Initialize the startup tips system."""
@@ -182,6 +452,18 @@ class SplashState:
         if not self.startup:
             return True
         return self.startup.acknowledge_tip()
+
+    def next_tip(self):
+        """Navigate to next tip (arrow right/down)."""
+        if self.startup:
+            total = len(STARTUP_TIPS)
+            self.startup.current_tip_index = (self.startup.current_tip_index + 1) % total
+
+    def prev_tip(self):
+        """Navigate to previous tip (arrow left/up)."""
+        if self.startup:
+            total = len(STARTUP_TIPS)
+            self.startup.current_tip_index = (self.startup.current_tip_index - 1) % total
 
     def should_show_tips(self) -> bool:
         """Check if tips page should be shown."""
@@ -239,15 +521,15 @@ class SplashRenderer:
             scr.refresh()
             return
 
-        # Select logo based on screen size
+        # Select logo based on screen size (use morphing logo for medium+)
         if screen_w >= 35 and screen_h >= 15:
-            logo = LOGO_MEDIUM
+            logo = self.splash.get_logo_frame()
         else:
             logo = LOGO_SMALL
 
         # Calculate layout
         logo_height = len(logo)
-        steps_to_show = min(5, len(self.splash.steps_completed) + 1)
+        steps_to_show = min(5, len(self.splash.steps_completed()) + 1)
         total_height = logo_height + 8 + steps_to_show  # logo + tagline + loading + steps + tip
         start_y = max(1, (screen_h - total_height) // 2)
 
@@ -296,34 +578,37 @@ class SplashRenderer:
         if fade < 0.2 and self.splash.show_steps:
             y = self._render_steps(scr, y, screen_w)
 
-        # Draw current tip at bottom (fades very early)
-        if fade < 0.15 and self.splash.tips and not self.splash.error:
-            tip_y = screen_h - 3
-            tip = self.splash.tips[self.splash.current_tip]
-            self._render_tip(scr, tip_y, screen_w, tip)
+        # Draw one random tip at bottom (fades very early) - disabled for now
+        # if fade < 0.15 and self.splash.tips and not self.splash.error:
+        #     tip_y = screen_h - 4
+        #     # Use random_tip_index if set, otherwise pick one now
+        #     idx = self.splash.random_tip_index
+        #     if idx < 0 or idx >= len(self.splash.tips):
+        #         idx = random.randint(0, len(self.splash.tips) - 1)
+        #         self.splash.random_tip_index = idx
+        #     tip = self.splash.tips[idx]
+        #     self._render_tip(scr, tip_y, screen_w, tip)
 
-        # Draw dismiss hint if ready (fades early)
+        # Draw dismiss hint if ready - yellow text
         if fade < 0.2 and self.splash.ready:
-            if self.splash.require_enter:
-                hint = "Press Enter to continue..."
-            else:
-                hint = "Press any key to continue..."
+            hint = "Press Enter to continue"
             hint_y = screen_h - 2
             x = (screen_w - len(hint)) // 2
             safe_addstr(scr, hint_y, max(0, x), hint,
-                       curses.A_BLINK | curses.color_pair(COLOR_SUBTITLE))
+                       curses.color_pair(COLOR_TIP))
 
         scr.refresh()
 
     def _render_loading_bar(self, scr, y: int, screen_w: int, fade_attr: int = 0):
         """Render loading bar and current message."""
         bar_width = min(40, screen_w - 10)
-        filled = int(bar_width * self.splash.loading_progress)
+        # Use animated progress for smooth display
+        progress = self.splash.get_display_progress()
+        filled = int(bar_width * progress)
         empty = bar_width - filled
 
-        # Spinner + bar + percentage
-        spinner = LOADING_FRAMES[self.splash.animation_frame]
-        bar = f"{spinner} [{'█' * filled}{'░' * empty}] {int(self.splash.loading_progress * 100):3d}%"
+        # Bar + percentage (no spinner)
+        bar = f"[{'█' * filled}{'░' * empty}] {int(progress * 100):3d}%"
 
         x = (screen_w - len(bar)) // 2
 
@@ -339,12 +624,11 @@ class SplashRenderer:
     def _render_steps(self, scr, y: int, screen_w: int) -> int:
         """Render completed steps and current step."""
         max_steps = 5
-        steps = self.splash.steps_completed[-max_steps:]
+        steps = self.splash.steps_completed()[-max_steps:]
 
         # Calculate available width for step text
         x = (screen_w - 44) // 2  # Align left of center block
         x = max(2, x)
-        step_max_width = screen_w - x - 1  # Leave 1 char margin
 
         # Show recent completed steps (dimmed)
         for step in steps:
@@ -356,11 +640,11 @@ class SplashRenderer:
             y += 1
 
         # Show current step (highlighted)
-        if self.splash.current_step:
-            spinner = LOADING_FRAMES[self.splash.animation_frame]
-            prefix = f"  {spinner} "
+        current = self.splash.current_step()
+        if current:
+            prefix = "  → "
             # Use smart_text for current step (may have long filenames)
-            step_text = smart_text(self.splash.current_step, screen_w, x + len(prefix), margin=1)
+            step_text = smart_text(current, screen_w, x + len(prefix), margin=1)
             line = prefix + step_text
             safe_addstr(scr, y, x, line, curses.color_pair(COLOR_STEP_ACTIVE))
             y += 1
@@ -377,6 +661,20 @@ class SplashRenderer:
                    curses.color_pair(COLOR_TIP) | curses.A_DIM)
         safe_addstr(scr, y, max(0, x + len(prefix)), tip,
                    curses.color_pair(COLOR_TIP))
+
+    def _render_shimmer_text(self, scr, y: int, x: int, text: str, frame: int,
+                              color: int, wavelength: float = 8.0, speed: float = 0.5):
+        """
+        Render text with a traveling shimmer wave effect.
+        Characters ripple between bright and dim states.
+        """
+        shimmer = wave_shimmer(text, frame, wavelength, speed)
+        for i, (char, is_bright) in enumerate(shimmer):
+            if is_bright:
+                attr = curses.A_BOLD | curses.color_pair(color)
+            else:
+                attr = curses.A_DIM | curses.color_pair(color)
+            safe_addstr(scr, y, x + i, char, attr)
 
     def render_tips_page(self, scr, screen_h: int, screen_w: int):
         """Render dedicated tips/tutorial page after loading."""
@@ -399,26 +697,26 @@ class SplashRenderer:
                    curses.color_pair(COLOR_TAGLINE) | curses.A_BOLD)
         y += 2
 
-        # Draw box around tip
+        # Draw single-line box around tip (dimmed)
         box_width = min(60, screen_w - 4)
         box_x = (screen_w - box_width) // 2
-        box_height = 8
+        box_attr = curses.color_pair(COLOR_SUBTITLE) | curses.A_DIM
 
-        # Top border
-        safe_addstr(scr, y, box_x, "┌" + "─" * (box_width - 2) + "┐",
-                   curses.color_pair(COLOR_SUBTITLE))
+        # Top border (single line)
+        safe_addstr(scr, y, box_x, "┌" + "─" * (box_width - 2) + "┐", box_attr)
         y += 1
 
         # Tip title
         title_line = f"│ {tip.title}"
         title_line = title_line + " " * (box_width - len(title_line) - 1) + "│"
-        safe_addstr(scr, y, box_x, smart_text(title_line, screen_w, box_x),
+        safe_addstr(scr, y, box_x, "│", box_attr)
+        safe_addstr(scr, y, box_x + 2, tip.title,
                    curses.color_pair(COLOR_LOGO) | curses.A_BOLD)
+        safe_addstr(scr, y, box_x + box_width - 1, "│", box_attr)
         y += 1
 
-        # Separator
-        safe_addstr(scr, y, box_x, "├" + "─" * (box_width - 2) + "┤",
-                   curses.color_pair(COLOR_SUBTITLE))
+        # Separator (single line)
+        safe_addstr(scr, y, box_x, "├" + "─" * (box_width - 2) + "┤", box_attr)
         y += 1
 
         # Tip content (wrap if needed)
@@ -438,52 +736,47 @@ class SplashRenderer:
             lines.append(current_line)
 
         for line in lines[:3]:  # Max 3 lines of content
-            content_line = f"│  {line}"
-            content_line = content_line + " " * (box_width - len(content_line) - 1) + "│"
-            safe_addstr(scr, y, box_x, content_line, curses.color_pair(7))
+            safe_addstr(scr, y, box_x, "│", box_attr)
+            safe_addstr(scr, y, box_x + 2, line, curses.color_pair(7))
+            safe_addstr(scr, y, box_x + box_width - 1, "│", box_attr)
             y += 1
 
         # Fill remaining space
         for _ in range(3 - len(lines[:3])):
-            empty_line = "│" + " " * (box_width - 2) + "│"
-            safe_addstr(scr, y, box_x, empty_line, curses.color_pair(COLOR_SUBTITLE))
+            safe_addstr(scr, y, box_x, "│", box_attr)
+            safe_addstr(scr, y, box_x + box_width - 1, "│", box_attr)
             y += 1
 
         # Shortcut or command line
         if tip.shortcut:
-            shortcut_line = f"│  Shortcut: {tip.shortcut}"
+            shortcut_text = f"Shortcut: {tip.shortcut}"
         elif tip.command:
-            shortcut_line = f"│  Command: {tip.command}"
+            shortcut_text = f"Command: {tip.command}"
         else:
-            shortcut_line = "│"
-        shortcut_line = shortcut_line + " " * (box_width - len(shortcut_line) - 1) + "│"
-        safe_addstr(scr, y, box_x, shortcut_line,
-                   curses.color_pair(COLOR_TIP))
+            shortcut_text = ""
+        safe_addstr(scr, y, box_x, "│", box_attr)
+        if shortcut_text:
+            safe_addstr(scr, y, box_x + 2, shortcut_text,
+                       curses.color_pair(COLOR_TIP))
+        safe_addstr(scr, y, box_x + box_width - 1, "│", box_attr)
         y += 1
 
-        # Bottom border
-        safe_addstr(scr, y, box_x, "└" + "─" * (box_width - 2) + "┘",
-                   curses.color_pair(COLOR_SUBTITLE))
+        # Bottom border (single line)
+        safe_addstr(scr, y, box_x, "└" + "─" * (box_width - 2) + "┘", box_attr)
         y += 2
 
-        # Progress indicator
-        tips_shown = self.splash.startup.tips_acknowledged + 1
-        total_tips = self.splash.startup.total_tips_to_show
-        progress = f"Tip {tips_shown} of {total_tips}"
+        # Progress indicator with arrow navigation
+        current_idx = self.splash.startup.current_tip_index + 1
+        total_tips = len(STARTUP_TIPS)
+        progress = f"◀  Tip {current_idx} of {total_tips}  ▶"
         x = (screen_w - len(progress)) // 2
         safe_addstr(scr, y, max(0, x), progress, curses.color_pair(COLOR_SUBTITLE))
         y += 2
 
-        # Navigation hint
-        hint = "Press Enter to continue..."
+        # Navigation hint - static text
+        hint = "Enter to continue  ←/→ browse tips"
         x = (screen_w - len(hint)) // 2
-        safe_addstr(scr, y, max(0, x), hint,
-                   curses.A_BLINK | curses.color_pair(COLOR_SUBTITLE))
-
-        # Skip hint at bottom
-        skip_hint = "(Press Esc to skip all tips)"
-        safe_addstr(scr, screen_h - 2, (screen_w - len(skip_hint)) // 2,
-                   skip_hint, curses.color_pair(7) | curses.A_DIM)
+        safe_addstr(scr, y, max(0, x), hint, curses.color_pair(COLOR_TAGLINE))
 
         scr.refresh()
 

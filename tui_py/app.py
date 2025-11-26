@@ -88,15 +88,16 @@ class App:
         splash_renderer = SplashRenderer(self.splash)
 
         def update_splash(msg, progress):
-            nonlocal h, w
-            h, w = scr.getmaxyx()  # Update size in case terminal resized
+            """Queue a step for display (non-blocking)."""
             self.splash.set_step(msg, progress)
+
+        def render_splash_frame():
+            """Render one frame, advancing step queue."""
+            nonlocal h, w
+            h, w = scr.getmaxyx()
             self.splash.tick()
             splash_renderer.render(scr, h, w)
             scr.refresh()
-            # Quick key check to allow early dismiss (but continue loading)
-            scr.nodelay(True)
-            scr.getch()
 
         try:
             # Step 1: Initialize project
@@ -199,10 +200,17 @@ class App:
             self.cli.add_output("tau - Terminal Audio Workstation - Type 'quickstart' for tutorial, 'help' for commands")
             self.cli.add_output(f"Session: {info['current_session']} | Lane 0=logs, Lane 9=events", is_log=True, log_level="INFO")
 
-            # Done!
+            # Done - queue ready state
             self.splash.set_ready()
-            SplashRenderer(self.splash).render(scr, h, w)
-            scr.refresh()
+
+            # Drain the step queue with rate-limited display
+            scr.timeout(50)  # 50ms polling for smooth animation
+            while not self.splash.ready:
+                render_splash_frame()
+                scr.getch()  # consume any keys
+
+            # Show final ready state
+            render_splash_frame()
 
             self._initialized = True
 
@@ -223,8 +231,7 @@ class App:
 
         except Exception as e:
             self.splash.set_error(str(e))
-            SplashRenderer(self.splash).render(scr, h, w)
-            scr.refresh()
+            render_splash_frame()
             raise
 
     def _detect_video_features(self):
@@ -344,6 +351,11 @@ class App:
                 stdscr.refresh()
                 key = stdscr.getch()
 
+                # Tab key triggers tau morph easter egg
+                if key == 9:  # Tab
+                    self.splash.trigger_tau_morph()
+                    continue
+
                 # Check for dismiss key
                 if self.splash.require_enter:
                     # Only Enter key (10 = newline, 13 = carriage return)
@@ -364,16 +376,22 @@ class App:
             stdscr.timeout(100)
 
             while self.splash.should_show_tips():
+                self.splash.tick_only_animation()
                 h, w = stdscr.getmaxyx()
                 splash_renderer.render_tips_page(stdscr, h, w)
                 key = stdscr.getch()
 
-                # Enter advances to next tip
+                # Enter immediately exits tips and starts app
                 if key == 10 or key == 13 or key == curses.KEY_ENTER:
-                    self.splash.advance_tip_page()
+                    break
                 # Escape skips all tips
                 elif key == 27:  # Escape
                     break
+                # Arrow keys navigate tips
+                elif key == curses.KEY_RIGHT or key == curses.KEY_DOWN:
+                    self.splash.next_tip()
+                elif key == curses.KEY_LEFT or key == curses.KEY_UP:
+                    self.splash.prev_tip()
 
         # Fade out splash and fade in interface
         self.splash.start_fade()
