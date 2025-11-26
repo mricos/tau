@@ -15,7 +15,7 @@ def register_palette_and_theming_commands(app_state):
 
     registry.register(CommandDef(
         name="palette",
-        category=CommandCategory.UTILITY,
+        category=CommandCategory.VIEW,
         description_short="Show color palette inspector",
         aliases=["colors"],
         handler=lambda: _show_palette(app_state)
@@ -23,7 +23,7 @@ def register_palette_and_theming_commands(app_state):
 
     registry.register(CommandDef(
         name="theme",
-        category=CommandCategory.UTILITY,
+        category=CommandCategory.VIEW,
         description_short="Load TDS theme file",
         params=[
             CommandParam("theme_name", ParamType.STRING, "Theme name (e.g., 'warm')")

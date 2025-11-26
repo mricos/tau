@@ -15,7 +15,7 @@ def register_utility_commands(app_state):
 
     registry.register(CommandDef(
         name="help",
-        category=CommandCategory.UTILITY,
+        category=CommandCategory.SYSTEM,
         description_short="Show help for commands",
         aliases=["h", "?"],
         params=[
@@ -28,7 +28,7 @@ def register_utility_commands(app_state):
 
     registry.register(CommandDef(
         name="quickstart",
-        category=CommandCategory.UTILITY,
+        category=CommandCategory.SYSTEM,
         description_short="Interactive quickstart guide for new users",
         aliases=["quick", "intro", "tutorial"],
         handler=lambda: _show_quickstart(app_state)
@@ -36,7 +36,7 @@ def register_utility_commands(app_state):
 
     registry.register(CommandDef(
         name="list_commands",
-        category=CommandCategory.UTILITY,
+        category=CommandCategory.SYSTEM,
         description_short="List all available commands",
         aliases=["lc", "commands"],
         handler=lambda: _list_commands(app_state)
@@ -44,14 +44,14 @@ def register_utility_commands(app_state):
 
     registry.register(CommandDef(
         name="clear",
-        category=CommandCategory.UTILITY,
+        category=CommandCategory.SYSTEM,
         description_short="Clear CLI output history",
         handler=lambda: None  # Handled by CLI manager
     ))
 
     registry.register(CommandDef(
         name="quit",
-        category=CommandCategory.UTILITY,
+        category=CommandCategory.SYSTEM,
         description_short="Quit application",
         aliases=["q", "exit"],
         key_binding="q",

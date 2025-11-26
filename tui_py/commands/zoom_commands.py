@@ -1,5 +1,5 @@
 """
-Zoom command definitions.
+Zoom command definitions (part of TRANSPORT category).
 """
 
 from tau_lib.core.commands_api import (
@@ -9,13 +9,13 @@ from tau_lib.core.commands_api import (
 
 
 def register_zoom_commands(app_state):
-    """Register zoom commands."""
+    """Register zoom commands (grouped under TRANSPORT)."""
 
-    # ========== ZOOM COMMANDS ==========
+    # ========== ZOOM COMMANDS (TRANSPORT) ==========
 
     registry.register(CommandDef(
         name="zoom",
-        category=CommandCategory.ZOOM,
+        category=CommandCategory.TRANSPORT,
         description_short="Set zoom span (time window width)",
         params=[
             CommandParam("span", ParamType.FLOAT, "Span in seconds", min_val=0.01)
@@ -25,7 +25,7 @@ def register_zoom_commands(app_state):
 
     registry.register(CommandDef(
         name="zoom_in",
-        category=CommandCategory.ZOOM,
+        category=CommandCategory.TRANSPORT,
         description_short="Zoom in (decrease span)",
         aliases=["zi"],
         key_binding="<",
@@ -34,7 +34,7 @@ def register_zoom_commands(app_state):
 
     registry.register(CommandDef(
         name="zoom_out",
-        category=CommandCategory.ZOOM,
+        category=CommandCategory.TRANSPORT,
         description_short="Zoom out (increase span)",
         aliases=["zo"],
         key_binding=">",

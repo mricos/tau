@@ -1,5 +1,5 @@
 """
-Config command definitions.
+Config command definitions (part of SYSTEM category).
 """
 
 from tau_lib.core.commands_api import (
@@ -15,7 +15,7 @@ def register_config_commands(app_state):
 
     registry.register(CommandDef(
         name="save",
-        category=CommandCategory.CONFIG,
+        category=CommandCategory.SYSTEM,
         description_short="Save configuration to file",
         params=[
             CommandParam("filename", ParamType.STRING, "Config file path (default: ~/.config/tau/config.toml)", default=None)
@@ -25,7 +25,7 @@ def register_config_commands(app_state):
 
     registry.register(CommandDef(
         name="load",
-        category=CommandCategory.CONFIG,
+        category=CommandCategory.SYSTEM,
         description_short="Load configuration from file",
         params=[
             CommandParam("filename", ParamType.STRING, "Config file path")
@@ -35,7 +35,7 @@ def register_config_commands(app_state):
 
     registry.register(CommandDef(
         name="status",
-        category=CommandCategory.CONFIG,
+        category=CommandCategory.SYSTEM,
         description_short="Show current status",
         aliases=["stat"],
         handler=lambda: _show_status(app_state)
@@ -43,7 +43,7 @@ def register_config_commands(app_state):
 
     registry.register(CommandDef(
         name="info",
-        category=CommandCategory.CONFIG,
+        category=CommandCategory.SYSTEM,
         description_short="Push detailed info to CLI lanes 7-8",
         params=[
             CommandParam(
@@ -60,7 +60,7 @@ def register_config_commands(app_state):
 
     registry.register(CommandDef(
         name="press_up_quick",
-        category=CommandCategory.CONFIG,
+        category=CommandCategory.SYSTEM,
         description_short="Set up-quick (tap) max duration in ms",
         aliases=["puq", "press_quick"],
         params=[
@@ -71,7 +71,7 @@ def register_config_commands(app_state):
 
     registry.register(CommandDef(
         name="press_up_medium",
-        category=CommandCategory.CONFIG,
+        category=CommandCategory.SYSTEM,
         description_short="Set up-medium (hold) threshold in ms",
         aliases=["pum", "press_medium"],
         params=[
@@ -82,7 +82,7 @@ def register_config_commands(app_state):
 
     registry.register(CommandDef(
         name="press_up_long",
-        category=CommandCategory.CONFIG,
+        category=CommandCategory.SYSTEM,
         description_short="Set up-long (long hold) threshold in ms",
         aliases=["pul", "press_long"],
         params=[
@@ -93,7 +93,7 @@ def register_config_commands(app_state):
 
     registry.register(CommandDef(
         name="press_double_click",
-        category=CommandCategory.CONFIG,
+        category=CommandCategory.SYSTEM,
         description_short="Set double-click window in ms",
         aliases=["pdc", "press_dc"],
         params=[
@@ -104,7 +104,7 @@ def register_config_commands(app_state):
 
     registry.register(CommandDef(
         name="press_info",
-        category=CommandCategory.CONFIG,
+        category=CommandCategory.SYSTEM,
         description_short="Show current press threshold settings",
         aliases=["pi"],
         handler=lambda: _show_press_info(app_state)

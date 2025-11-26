@@ -15,7 +15,7 @@ def register_lane_editor_commands(app_state):
 
     registry.register(CommandDef(
         name="inspect",
-        category=CommandCategory.UTILITY,
+        category=CommandCategory.LANES,
         description_short="Inspect data values in current window",
         params=[
             CommandParam("lane_id", ParamType.INT, "Lane ID (1-8)", min_val=1, max_val=8)
@@ -25,14 +25,14 @@ def register_lane_editor_commands(app_state):
 
     registry.register(CommandDef(
         name="term_info",
-        category=CommandCategory.UTILITY,
+        category=CommandCategory.LANES,
         description_short="Show terminal color capabilities",
         handler=lambda: _show_terminal_info()
     ))
 
     registry.register(CommandDef(
         name="lane",
-        category=CommandCategory.UTILITY,
+        category=CommandCategory.LANES,
         description_short="Edit lane properties (name, clip_name, gain, color, height, label)",
         params=[
             CommandParam("lane_id", ParamType.INT, "Lane ID (1-8)", min_val=1, max_val=8,
@@ -47,7 +47,7 @@ def register_lane_editor_commands(app_state):
 
     registry.register(CommandDef(
         name="clip",
-        category=CommandCategory.UTILITY,
+        category=CommandCategory.LANES,
         description_short="Set clip name for a lane",
         params=[
             CommandParam("lane_id", ParamType.INT, "Lane ID (1-8)", min_val=1, max_val=8),

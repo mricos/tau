@@ -1063,18 +1063,18 @@ def register_video_commands(app_state):
 
     registry.register(CommandDef(
         name="video_load",
-        category=CommandCategory.SYSTEM,
+        category=CommandCategory.UTILITY,
         description_short="Load video file for playback",
         params=[
             CommandParam("video_path", ParamType.STRING, "Path to video file (mp4, mkv, etc.)"),
-            CommandParam("lane_id", ParamType.INT, "Lane to display in (default: 5)", required=False, default=5)
+            CommandParam("lane_id", ParamType.INT, "Lane to display in (default: 5)", default=5)
         ],
         handler=lambda video_path, lane_id=5: _video_load(app_state, video_path, lane_id)
     ))
 
     registry.register(CommandDef(
         name="video_load_session",
-        category=CommandCategory.SYSTEM,
+        category=CommandCategory.UTILITY,
         description_short="Load video from screentool session",
         params=[
             CommandParam("epoch", ParamType.STRING, "Session epoch timestamp")
@@ -1093,7 +1093,7 @@ def register_video_commands(app_state):
 
     registry.register(CommandDef(
         name="video_info",
-        category=CommandCategory.INFO,
+        category=CommandCategory.UTILITY,
         description_short="Show video information",
         aliases=["vi"],
         handler=lambda: _video_info(app_state)
@@ -1101,11 +1101,11 @@ def register_video_commands(app_state):
 
     registry.register(CommandDef(
         name="video_resample",
-        category=CommandCategory.SYSTEM,
+        category=CommandCategory.UTILITY,
         description_short="Regenerate video thumbnail strip",
         params=[
-            CommandParam("sampling_interval", ParamType.FLOAT, "Frames per second to sample", required=False),
-            CommandParam("thumbnail_size", ParamType.INT, "NxN thumbnail size", required=False)
+            CommandParam("sampling_interval", ParamType.FLOAT, "Frames per second to sample"),
+            CommandParam("thumbnail_size", ParamType.INT, "NxN thumbnail size")
         ],
         handler=lambda sampling_interval=None, thumbnail_size=None: _video_resample(app_state, sampling_interval, thumbnail_size)
     ))

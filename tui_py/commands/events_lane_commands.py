@@ -15,7 +15,7 @@ def register_events_lane_commands(app_state):
 
     registry.register(CommandDef(
         name="events_add",
-        category=CommandCategory.UTILITY,
+        category=CommandCategory.LANES,
         description_short="Add event to events lane",
         aliases=["event", "log"],
         params=[
@@ -30,7 +30,7 @@ def register_events_lane_commands(app_state):
 
     registry.register(CommandDef(
         name="events_filter",
-        category=CommandCategory.UTILITY,
+        category=CommandCategory.LANES,
         description_short="Filter events by level, message, or time",
         aliases=["ef"],
         params=[
@@ -44,7 +44,7 @@ def register_events_lane_commands(app_state):
 
     registry.register(CommandDef(
         name="events_time_format",
-        category=CommandCategory.UTILITY,
+        category=CommandCategory.LANES,
         description_short="Set event timestamp format",
         aliases=["etf"],
         params=[
@@ -57,7 +57,7 @@ def register_events_lane_commands(app_state):
 
     registry.register(CommandDef(
         name="events_stats",
-        category=CommandCategory.UTILITY,
+        category=CommandCategory.LANES,
         description_short="Show event statistics",
         aliases=["es"],
         handler=lambda: _events_stats(app_state)
@@ -65,7 +65,7 @@ def register_events_lane_commands(app_state):
 
     registry.register(CommandDef(
         name="events_clear",
-        category=CommandCategory.UTILITY,
+        category=CommandCategory.LANES,
         description_short="Clear all events",
         aliases=["ec"],
         handler=lambda: _events_clear(app_state)
