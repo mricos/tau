@@ -27,15 +27,19 @@ class ParamType(Enum):
 
 
 class CommandCategory(Enum):
-    """Command categories with color suggestions."""
-    TRANSPORT = ("transport", 1)   # Color 1 (amber/orange)
-    ZOOM = ("zoom", 2)              # Color 2 (green)
-    PARAMS = ("params", 3)          # Color 3 (red)
-    LANES = ("lanes", 4)            # Color 4 (blue)
-    MARKERS = ("markers", 5)        # Color 5 (yellow)
-    DISPLAY = ("display", 6)        # Color 6 (magenta)
-    CONFIG = ("config", 7)          # Color 7 (cyan)
-    UTILITY = ("utility", 8)        # Color 8 (white)
+    """Command categories with color suggestions (6 categories)."""
+    TRANSPORT = ("transport", 1)   # Color 1 - playback, zoom, scrub
+    PARAMS = ("params", 2)         # Color 2 - kernel parameters
+    LANES = ("lanes", 3)           # Color 3 - lane management, display modes
+    MARKERS = ("markers", 4)       # Color 4 - markers, navigation
+    VIEW = ("view", 5)             # Color 5 - display settings, video, palettes
+    SYSTEM = ("system", 6)         # Color 6 - config, files, engine, project
+
+    # Legacy aliases for backwards compatibility during transition
+    ZOOM = ("transport", 1)        # -> TRANSPORT
+    DISPLAY = ("view", 5)          # -> VIEW
+    CONFIG = ("system", 6)         # -> SYSTEM
+    UTILITY = ("system", 6)        # -> SYSTEM
 
     def __init__(self, name: str, color: int):
         self.category_name = name

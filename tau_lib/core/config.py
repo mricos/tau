@@ -46,6 +46,11 @@ def save_config(state: AppState, path: str):
             'thumbnail_size': state.features.video_thumbnail_size,
             'popup_resolution': list(state.features.video_popup_resolution),
         },
+        'startup': {
+            'show_tips': state.features.show_startup_tips,
+            'tips_count': state.features.startup_tips_count,
+            'require_enter': state.features.require_enter_to_advance,
+        },
         'files': {},
     }
 
@@ -129,6 +134,13 @@ def load_config(path: str) -> Optional[AppState]:
         popup_res = v.get('popup_resolution', [80, 40])
         if isinstance(popup_res, list) and len(popup_res) == 2:
             state.features.video_popup_resolution = tuple(popup_res)
+
+    # Load startup settings
+    if 'startup' in config:
+        s = config['startup']
+        state.features.show_startup_tips = s.get('show_tips', True)
+        state.features.startup_tips_count = s.get('tips_count', 3)
+        state.features.require_enter_to_advance = s.get('require_enter', True)
 
     # Load files
     if 'files' in config:

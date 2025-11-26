@@ -404,6 +404,11 @@ class FeatureFlags:
     video_thumbnail_size: int = 4       # NxN thumbnail resolution (default 4x4)
     video_popup_resolution: tuple = (80, 40)  # Popup viewer resolution (w, h)
 
+    # Startup experience
+    show_startup_tips: bool = True      # Show "did you know" tips on startup
+    startup_tips_count: int = 3         # Number of tips to show before main UI
+    require_enter_to_advance: bool = True  # Require Enter (not any key) to advance
+
 
 # ========== Top-Level Application State ==========
 

@@ -171,8 +171,8 @@ class TetraDevices:
                 'playback': config.get('playback', {}),
             }
             self._defaults = config.get('defaults', {})
-        except Exception as e:
-            print(f"Warning: Failed to load {DEVICES_TOML}: {e}")
+        except Exception:
+            pass  # Config load failed, use defaults
 
     def _send_command(self, cmd: str, timeout: float = 2.0) -> str:
         """Send command to tau-engine and return response."""
