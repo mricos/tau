@@ -252,17 +252,21 @@ class CLIManager:
 
         return cmd if cmd else None
 
-    def add_output(self, text: str, is_log: bool = False, log_level: str = "INFO"):
+    def add_output(self, text: str, is_log: bool = False, log_level: str = "INFO", record_event: bool = True):
         """
-        Add output line and record as event.
+        Add output line and optionally record as event.
 
         Args:
             text: Output text
             is_log: If True, record as log (less frequent, color coded)
             log_level: Log level for color coding (INFO, WARNING, ERROR, SUCCESS)
+            record_event: If False, skip recording to events/logs lane
         """
         if text:
             self.output.append(text)
+
+            if not record_event:
+                return
 
             # Record event with deltaTimeMs
             current_time = time.time()
@@ -337,6 +341,12 @@ class CLIManager:
         """Insert selected completion into buffer."""
         item = self._completion.get_selected()
         if not item:
+            return
+
+        # Don't insert placeholder hints (empty or <param> style)
+        if not item.text or item.text.startswith('<'):
+            # Just hide the popup - it's informational only
+            self._completion.hide()
             return
 
         # Parse buffer to determine what to replace
