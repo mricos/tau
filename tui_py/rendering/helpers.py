@@ -144,6 +144,61 @@ def get_channel_color(channel_id: int) -> int:
     return colors[channel_id] if channel_id < len(colors) else 1
 
 
+# ========== Text Truncation ==========
+
+def truncate_middle(text: str, max_width: int, ellipsis: str = "...") -> str:
+    """
+    Truncate text in the middle with ellipsis if too long.
+
+    Args:
+        text: Text to truncate
+        max_width: Maximum width allowed
+        ellipsis: Ellipsis string (default "...")
+
+    Returns:
+        Truncated text or original if fits
+
+    Examples:
+        truncate_middle("Loading very long filename.wav", 20) -> "Loading...ame.wav"
+        truncate_middle("short", 20) -> "short"
+    """
+    if len(text) <= max_width:
+        return text
+
+    if max_width <= len(ellipsis):
+        return ellipsis[:max_width]
+
+    # Calculate how much of start and end to keep
+    available = max_width - len(ellipsis)
+    # Slightly favor the start for readability
+    start_len = (available + 1) // 2
+    end_len = available - start_len
+
+    return text[:start_len] + ellipsis + text[-end_len:] if end_len > 0 else text[:start_len] + ellipsis
+
+
+def smart_text(text: str, screen_width: int, x_pos: int = 0, margin: int = 1) -> str:
+    """
+    Prepare text for safe screen rendering with edge awareness.
+
+    Always leaves `margin` columns from the right edge to show awareness.
+    Truncates in middle with "..." if needed.
+
+    Args:
+        text: Text to render
+        screen_width: Total screen width
+        x_pos: Starting x position
+        margin: Columns to leave from right edge (default 1)
+
+    Returns:
+        Text safe for rendering at x_pos
+    """
+    max_width = screen_width - x_pos - margin
+    if max_width <= 0:
+        return ""
+    return truncate_middle(text, max_width)
+
+
 # ========== Drawing Helpers ==========
 
 def safe_addstr(scr, y: int, x: int, text: str, attr=0, max_width: int = None):
@@ -162,6 +217,32 @@ def safe_addstr(scr, y: int, x: int, text: str, attr=0, max_width: int = None):
             text = text[:available]
 
         scr.addnstr(y, x, text, available, attr)
+    except curses.error:
+        pass
+
+
+def safe_addstr_smart(scr, y: int, x: int, text: str, attr=0, margin: int = 1):
+    """
+    Safely add string with smart middle truncation.
+
+    Uses smart_text() for edge-aware truncation, then renders.
+    Always leaves `margin` columns from right edge.
+
+    Args:
+        scr: curses screen
+        y, x: Position
+        text: Text to render
+        attr: curses attributes
+        margin: Columns to leave from right edge
+    """
+    try:
+        h, w = scr.getmaxyx()
+        if y < 0 or y >= h or x < 0 or x >= w:
+            return
+
+        smart = smart_text(text, w, x, margin)
+        if smart:
+            scr.addnstr(y, x, smart, len(smart), attr)
     except curses.error:
         pass
 

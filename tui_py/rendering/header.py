@@ -120,13 +120,14 @@ class HeaderRenderer:
 
     def _render_lanes_row(self, scr, width: int):
         """
-        Render row 1: File info only (lane indicators moved to row 0).
+        Render row 1: File info (left), perf stats (right).
 
         Args:
             scr: curses screen
             width: Terminal width
         """
         from tui_py.ui.ui_utils import WidthContext, truncate_middle
+        from tui_py.rendering.perf_monitor import get_monitor
 
         # Width context for adaptive rendering
         wctx = WidthContext.from_width(width)
@@ -140,7 +141,10 @@ class HeaderRenderer:
                 filename = truncate_middle(self.state.data_file, 40)
             file_info = filename
 
-        # Draw row 1 - LEFT: file, RIGHT: CLI info
+        # Performance stats (right side)
+        perf_stats = get_monitor().format_compact()
+
+        # Draw row 1 - LEFT: file, RIGHT: perf stats
         x_pos = 0
 
         # File info (left side, dimmed gray)
@@ -149,10 +153,19 @@ class HeaderRenderer:
                        curses.A_DIM | curses.color_pair(COLOR_TEXT_DIM))
             x_pos += len(file_info) + 2
 
-        # Fill rest of line
-        remaining = width - x_pos
-        if remaining > 0:
-            safe_addstr(scr, 1, x_pos, " " * remaining, curses.color_pair(BG))
+        # Calculate right position for perf stats
+        perf_len = len(perf_stats)
+        perf_x = width - perf_len - 1  # 1 char margin
+
+        # Fill middle
+        middle_len = perf_x - x_pos
+        if middle_len > 0:
+            safe_addstr(scr, 1, x_pos, " " * middle_len, curses.color_pair(BG))
+
+        # Perf stats (right side, dimmed)
+        if perf_x > x_pos:
+            safe_addstr(scr, 1, perf_x, perf_stats,
+                       curses.A_DIM | curses.color_pair(COLOR_TEXT_DIM))
 
     def get_height(self) -> int:
         """Get header height (always 2 rows)."""

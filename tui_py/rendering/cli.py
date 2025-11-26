@@ -143,17 +143,17 @@ class CLIRenderer:
         """Clear status line text."""
         self.status_text = ""
 
-    def render_completions(self, scr, y_start: int, width: int):
+    def render_completions(self, scr, prompt_y: int, width: int):
         """
-        Render completion popup above CLI prompt.
+        Render completion items ABOVE CLI prompt.
 
         Args:
             scr: curses screen
-            y_start: Starting y position for popup
+            prompt_y: Y position of the CLI prompt (items render above this)
             width: Terminal width
 
         Returns:
-            int: Number of lines rendered
+            int: Number of lines rendered above prompt
         """
         cli = self.state.cli
 
@@ -164,90 +164,126 @@ class CLIRenderer:
         items = cli.completion_items
         selected_idx = cli.selected_index
 
-        # Calculate height: header + items (max 8) + preview (3 lines)
+        # Calculate height: header + items (max 8) - NO preview above
         max_visible_items = 8
         total_items = len(items)
-        preview_height = 3
         header_height = 1
 
         # Calculate scrolling window to show selected item
         if total_items <= max_visible_items:
-            # All items fit - show all
             start_idx = 0
             num_items = total_items
         else:
-            # Need scrolling - center selected item in window
             half_window = max_visible_items // 2
             start_idx = max(0, min(selected_idx - half_window, total_items - max_visible_items))
             num_items = max_visible_items
 
-        total_height = header_height + num_items + preview_height
+        items_height = header_height + num_items
 
-        # Render header with category context and scroll indicator
-        scr.move(y_start, 0)
+        # Calculate starting y position (renders upward from prompt)
+        y_start = prompt_y - items_height
+        if y_start < 2:  # Don't overlap header
+            y_start = 2
+            available = prompt_y - 2 - header_height
+            if available < num_items:
+                num_items = max(1, available)
+                items_height = header_height + num_items
+                y_start = prompt_y - items_height
+
+        # Clear the area above prompt
+        max_clear = header_height + max_visible_items
+        clear_start = max(2, prompt_y - max_clear)
+        for clear_y in range(clear_start, prompt_y):
+            scr.move(clear_y, 0)
+            scr.clrtoeol()
+
+        y = y_start
+
+        # Render header
+        scr.move(y, 0)
         scr.clrtoeol()
 
-        # Check if we're in a category
         current_cat = cli.current_category
-        if current_cat:
-            # In category - show back navigation hint
+        first_item = items[0] if items else None
+        item_type = first_item.type if first_item else "command"
+
+        if item_type == "argument":
+            cmd_name = cli.input_buffer.split()[0] if cli.input_buffer.strip() else ""
+            header = f" {cmd_name}: arguments"
+        elif current_cat:
             if total_items > max_visible_items:
                 header = f" ← {current_cat.upper()} ({len(items)}): [{start_idx+1}-{start_idx+num_items} of {total_items}]"
             else:
                 header = f" ← {current_cat.upper()} ({len(items)} commands)"
-        else:
-            # At category level
+        elif item_type == "category":
             if total_items > max_visible_items:
                 header = f" Categories ({len(items)}): [{start_idx+1}-{start_idx+num_items} of {total_items}]"
             else:
-                header = f" Categories ({len(items)}): [↑↓ nav, → expand]"
-        safe_addstr(scr, y_start, 1, header, curses.A_BOLD | curses.color_pair(COLOR_STATUS))
-        y = y_start + 1
+                header = f" Categories ({len(items)}): [↑↓ nav, Tab expand]"
+        else:
+            if total_items > max_visible_items:
+                header = f" Commands ({len(items)}): [{start_idx+1}-{start_idx+num_items} of {total_items}]"
+            else:
+                header = f" Commands ({len(items)})"
+        safe_addstr(scr, y, 1, header, curses.A_BOLD | curses.color_pair(COLOR_STATUS))
+        y += 1
 
-        # Render items (windowed view)
+        # Render items
         for i in range(start_idx, start_idx + num_items):
             item = items[i]
             is_selected = (i == selected_idx)
 
-            # Clear the line first to prevent ghosting
             scr.move(y, 0)
             scr.clrtoeol()
 
-            # Format completion line (2-column layout)
             from tui_py.ui.completion import format_completion_line
             line_text = format_completion_line(item, width - 2, is_selected)
 
-            # Choose color based on selection and category
             if is_selected:
-                # Selected: green with reverse video
-                color_attr = curses.A_REVERSE | curses.color_pair(9)  # SUCCESS green
+                color_attr = curses.A_REVERSE | curses.color_pair(9)
             else:
-                # Normal: use category color
                 color_attr = curses.color_pair(item.color)
 
-            # Draw line indented by 1 column
             safe_addstr(scr, y, 1, line_text[:width - 2], color_attr)
             y += 1
 
-        # Blank line before preview
-        scr.move(y, 0)
+        return items_height
+
+    def render_completion_preview(self, scr, y_start: int, width: int):
+        """
+        Render one-line status for selected completion BELOW the prompt.
+
+        Args:
+            scr: curses screen
+            y_start: Y position to render
+            width: Terminal width
+
+        Returns:
+            int: Number of lines rendered (always 1 or 0)
+        """
+        cli = self.state.cli
+
+        if not cli.completions_visible or not cli.completion_items:
+            return 0
+
+        selected_idx = cli.selected_index
+        if selected_idx >= len(cli.completion_items):
+            return 0
+
+        item = cli.completion_items[selected_idx]
+
+        # Build one-liner based on item type
+        if item.type == "category":
+            status = f"{item.text}: {item.command_count} commands"
+        elif item.type == "command":
+            # Show usage or description
+            status = item.description
+        else:
+            # Arguments - show the description
+            status = item.description
+
+        scr.move(y_start, 0)
         scr.clrtoeol()
-        y += 1
+        safe_addstr(scr, y_start, 2, status[:width - 4], curses.A_DIM | curses.color_pair(COLOR_STATUS))
 
-        # Render preview of selected item
-        if selected_idx < len(items):
-            selected_item = items[selected_idx]
-
-            # Show first few lines of full help
-            preview_lines = selected_item.full_help[:preview_height]
-
-            for line in preview_lines:
-                # Clear the line first to prevent ghosting
-                scr.move(y, 0)
-                scr.clrtoeol()
-                # Truncate and indent
-                display_line = line[:width - 4]
-                safe_addstr(scr, y, 2, display_line, curses.A_DIM | curses.color_pair(COLOR_INPUT))
-                y += 1
-
-        return total_height
+        return 1

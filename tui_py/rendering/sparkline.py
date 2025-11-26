@@ -7,6 +7,7 @@ Enhanced version supports two-row sparklines with foreground/background control.
 import curses
 from typing import List, Tuple
 from tui_py.rendering.helpers import safe_addch, safe_addstr
+from tui_py.rendering.data_view import get_visible_slice
 
 
 # Unicode block characters for sparkline (9 levels: space + 8 blocks)
@@ -79,19 +80,21 @@ def render_sparkline(
     if clip_name:
         safe_addstr(scr, y, x_start + len(label), clip_label, curses.color_pair(color))
 
-    # Sample data across time window
+    # Get visible slice using binary search - O(log n)
     span = max(1e-12, right_t - left_t)
+    visible = get_visible_slice(data_buffer, left_t, right_t)
 
-    # Collect samples binned by screen column
+    if not visible:
+        # No data in window
+        safe_addstr(scr, y, sparkline_start, "─" * sparkline_width,
+                   curses.A_DIM | curses.color_pair(color))
+        return
+
+    # Bin visible data into screen columns
     bins = [[] for _ in range(sparkline_width)]
-
-    for t, vals in data_buffer:
-        if t < left_t or t > right_t:
-            continue
+    for t, vals in visible:
         if channel_id >= len(vals):
             continue
-
-        # Map time to column
         x_frac = (t - left_t) / span
         col = int(x_frac * sparkline_width)
         if 0 <= col < sparkline_width:
@@ -101,7 +104,6 @@ def render_sparkline(
     # Find global min/max for normalization
     all_vals = [v for bin_vals in bins if bin_vals for v in bin_vals]
     if not all_vals:
-        # No data in window
         safe_addstr(scr, y, sparkline_start, "─" * sparkline_width,
                    curses.A_DIM | curses.color_pair(color))
         return
@@ -206,15 +208,14 @@ def render_sparkline_with_stats(
 
     sparkline_start = x_start + label_width
 
-    # Render sparkline (same logic as above)
+    # Get visible slice using binary search - O(log n)
     span = max(1e-12, right_t - left_t)
+    visible = get_visible_slice(data_buffer, left_t, right_t)
     bins = [[] for _ in range(sparkline_width)]
 
     playhead_val = None  # Track value at playhead
 
-    for t, vals in data_buffer:
-        if t < left_t or t > right_t:
-            continue
+    for t, vals in visible:
         if channel_id >= len(vals):
             continue
 
@@ -327,15 +328,14 @@ def render_sparkline_two_row(
     if clip_name:
         safe_addstr(scr, y, x_start + len(label), clip_label, curses.color_pair(color))
 
-    # Sample data across time window
+    # Get visible slice using binary search - O(log n)
     span = max(1e-12, right_t - left_t)
+    visible = get_visible_slice(data_buffer, left_t, right_t)
 
     # Collect samples binned by screen column
     bins = [[] for _ in range(sparkline_width)]
 
-    for t, vals in data_buffer:
-        if t < left_t or t > right_t:
-            continue
+    for t, vals in visible:
         if channel_id >= len(vals):
             continue
 

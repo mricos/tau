@@ -1,15 +1,26 @@
 """
-Video rendering for tau - compact and expanded modes.
+Video rendering for tau - compact and expanded modes with palette support.
 """
 
 import curses
 from typing import List, Optional
 from tui_py.rendering.helpers import safe_addstr
+from tui_py.rendering.video_palettes import frame_to_ascii, PALETTES
 
 
-def render_video_compact(scr, video_lane: 'VideoLane', transport: 'Transport', layout, label: str = "", color: int = 5):
+def render_video_compact(
+    scr,
+    video_lane: 'VideoLane',
+    transport: 'Transport',
+    layout,
+    label: str = "",
+    color: int = 5,
+    palette: str = "simple",
+    brightness: float = 0.0,
+    contrast: float = 1.0
+):
     """
-    Render video in compact mode (4x4 ASCII thumbnail in lane).
+    Render video in compact mode (ASCII thumbnail in lane).
 
     Args:
         scr: curses screen
@@ -18,9 +29,12 @@ def render_video_compact(scr, video_lane: 'VideoLane', transport: 'Transport', l
         layout: Layout object with y, x, h, w
         label: Lane label
         color: Color pair
+        palette: ASCII palette (simple, extended, braille, blocks)
+        brightness: Brightness adjustment (-1.0 to 1.0)
+        contrast: Contrast multiplier (0.1 to 3.0)
     """
-    # Get current frame
-    frame = video_lane.get_frame_at_time(transport.position)
+    # Get current frame from cache
+    frame = video_lane.get_frame_at_time(transport.position, palette, brightness, contrast)
 
     if not frame:
         # No frame available
@@ -36,26 +50,60 @@ def render_video_compact(scr, video_lane: 'VideoLane', transport: 'Transport', l
     frame_height = len(frame)
 
     # Calculate centering
-    available_height = layout.h - 1  # Leave room for label
+    available_height = layout.h - 2  # Leave room for label and info
     start_y = layout.y + 1 + max(0, (available_height - frame_height) // 2)
     start_x = layout.x + max(0, (layout.w - frame_width) // 2)
 
     # Render each line of ASCII frame
     for i, line in enumerate(frame):
         y = start_y + i
-        if y >= layout.y + layout.h:
-            break  # Clip to layout bounds
+        if y >= layout.y + layout.h - 1:
+            break  # Clip to layout bounds (leave room for info row)
         safe_addstr(scr, y, start_x, line, curses.color_pair(color))
 
-    # Show position indicator
-    if video_lane.metadata:
-        duration = video_lane.metadata.duration
-        pct = (transport.position / duration * 100) if duration > 0 else 0
-        time_str = f"{transport.position:.1f}s/{duration:.1f}s ({pct:.0f}%)"
-        safe_addstr(scr, layout.y + layout.h - 1, layout.x, time_str, curses.A_DIM)
+    # Show compact info in single row (gray/dim)
+    _render_compact_info(scr, layout, transport, video_lane, palette, brightness, contrast)
 
 
-def render_video_expanded(scr, frame: List[str], y: int, x: int, width: int, height: int, color: int = 5):
+def _render_compact_info(scr, layout, transport, video_lane, palette: str, brightness: float, contrast: float):
+    """Render single-row compact video info in gray."""
+    if not video_lane.metadata:
+        return
+
+    meta = video_lane.metadata
+    duration = meta.duration
+    pos = transport.position
+    pct = (pos / duration * 100) if duration > 0 else 0
+
+    # Compact info: time + palette + adjustments (if non-default)
+    info_parts = [f"{pos:.1f}s/{duration:.1f}s ({pct:.0f}%)"]
+
+    # Add palette if not simple
+    if palette != "simple":
+        info_parts.append(f"[{palette}]")
+
+    # Add adjustments if non-default
+    if brightness != 0.0:
+        info_parts.append(f"br:{brightness:+.1f}")
+    if contrast != 1.0:
+        info_parts.append(f"ct:{contrast:.1f}")
+
+    info_str = " ".join(info_parts)
+
+    # Render in dim gray on last row of lane
+    info_y = layout.y + layout.h - 1
+    safe_addstr(scr, info_y, layout.x, info_str[:layout.w-1], curses.A_DIM)
+
+
+def render_video_expanded(
+    scr,
+    frame: List[str],
+    y: int,
+    x: int,
+    width: int,
+    height: int,
+    color: int = 5
+):
     """
     Render expanded video frame (for popup viewer).
 
@@ -86,9 +134,77 @@ def render_video_expanded(scr, frame: List[str], y: int, x: int, width: int, hei
         safe_addstr(scr, line_y, start_x, line[:width], curses.color_pair(color))
 
 
+def render_popup_info(
+    scr,
+    y: int,
+    x: int,
+    w: int,
+    transport: 'Transport',
+    video_lane: 'VideoLane',
+    palette: str,
+    brightness: float,
+    contrast: float
+):
+    """
+    Render single-row video info in popup header (gray).
+
+    Args:
+        scr: curses screen
+        y: Row for info
+        x: Column start
+        w: Available width
+        transport: Transport state
+        video_lane: Video lane
+        palette: Current palette name
+        brightness: Brightness adjustment
+        contrast: Contrast adjustment
+    """
+    if not video_lane or not video_lane.metadata:
+        return
+
+    meta = video_lane.metadata
+    duration = meta.duration
+    pos = transport.position
+    pct = (pos / duration * 100) if duration > 0 else 0
+
+    # Compact info string
+    info_parts = [
+        f"{meta.path.name}",
+        f"{pos:.1f}s/{duration:.1f}s",
+        f"({pct:.0f}%)",
+        f"{meta.width}x{meta.height}",
+        f"{meta.fps:.0f}fps",
+        f"[{palette}]"
+    ]
+
+    # Add adjustments if non-default
+    if brightness != 0.0:
+        info_parts.append(f"br:{brightness:+.1f}")
+    if contrast != 1.0:
+        info_parts.append(f"ct:{contrast:.1f}")
+
+    info_str = " ".join(info_parts)
+    info_str = info_str[:w-4]  # Truncate to fit
+
+    # Render centered in dim gray
+    info_x = x + (w - len(info_str)) // 2
+    safe_addstr(scr, y, info_x, info_str, curses.A_DIM)
+
+
+def render_popup_controls_hint(scr, y: int, x: int, w: int):
+    """Render controls hint in popup footer (single row, gray)."""
+    hint = "[V]close [space]play [←→]scrub [+/-]brightness [</>]contrast [p]palette"
+    hint = hint[:w-4]
+    hint_x = x + (w - len(hint)) // 2
+    safe_addstr(scr, y, hint_x, hint, curses.A_DIM)
+
+
+# Legacy function for compatibility
 def frame_to_ascii_stippled(frame, width: int, height: int) -> List[str]:
     """
     Convert video frame to stippled ASCII art using dithering.
+
+    DEPRECATED: Use frame_to_ascii with palette="extended" and dither=True instead.
 
     Args:
         frame: OpenCV frame (BGR)
@@ -98,45 +214,12 @@ def frame_to_ascii_stippled(frame, width: int, height: int) -> List[str]:
     Returns:
         List of ASCII lines
     """
-    import cv2
-    import numpy as np
-
-    # Resize to target resolution
-    resized = cv2.resize(frame, (width, height))
-    gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-
-    # Extended ASCII character set (dark to light)
-    # Using gradual brightness ramp
-    chars = " .'`^\",:;Il!i><~+_-?][}{1)(|/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$"
-
-    # Simple Floyd-Steinberg dithering for better quality
-    # Clone to float for error diffusion
-    img_float = gray.astype(np.float32)
-
-    ascii_art = []
-    for y_pos in range(height):
-        row = []
-        for x_pos in range(width):
-            old_val = img_float[y_pos, x_pos]
-            # Map to character
-            char_idx = int(old_val / 255 * (len(chars) - 1))
-            char_idx = max(0, min(len(chars) - 1, char_idx))
-            row.append(chars[char_idx])
-
-            # Floyd-Steinberg error diffusion
-            new_val = (char_idx / (len(chars) - 1)) * 255
-            error = old_val - new_val
-
-            # Diffuse error to neighbors
-            if x_pos + 1 < width:
-                img_float[y_pos, x_pos + 1] += error * 7 / 16
-            if y_pos + 1 < height:
-                if x_pos > 0:
-                    img_float[y_pos + 1, x_pos - 1] += error * 3 / 16
-                img_float[y_pos + 1, x_pos] += error * 5 / 16
-                if x_pos + 1 < width:
-                    img_float[y_pos + 1, x_pos + 1] += error * 1 / 16
-
-        ascii_art.append(''.join(row))
-
-    return ascii_art
+    return frame_to_ascii(
+        frame,
+        width,
+        height,
+        palette="extended",
+        brightness=0.0,
+        contrast=1.0,
+        dither=True
+    )

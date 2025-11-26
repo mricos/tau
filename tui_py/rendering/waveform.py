@@ -1,11 +1,13 @@
 """
 Waveform rendering for expanded lane view.
 Consolidates envelope and points rendering for single-lane display.
+Uses binary search for efficient visible data lookup.
 """
 
 import curses
 from typing import List, Tuple
 from tui_py.rendering.helpers import safe_addch, safe_addstr
+from tui_py.rendering.data_view import get_visible_slice
 
 
 def render_waveform_envelope(
@@ -66,10 +68,11 @@ def render_waveform_envelope(
     # Center line for zero reference
     mid_row = y_start + height // 2
 
+    # Get visible slice using binary search - O(log n)
+    visible = get_visible_slice(data_buffer, left_t, right_t)
+
     # Collect data points
-    for t, vals in data_buffer:
-        if t < left_t or t > right_t:
-            continue
+    for t, vals in visible:
         if channel_id >= len(vals):
             continue
 
@@ -191,12 +194,13 @@ def render_waveform_points(
     # Center line for zero reference
     mid_row = y_start + height // 2
 
+    # Get visible slice using binary search - O(log n)
+    visible = get_visible_slice(data_buffer, left_t, right_t)
+
     last_x = None
     last_y = None
 
-    for t, vals in data_buffer:
-        if t < left_t or t > right_t:
-            continue
+    for t, vals in visible:
         if channel_id >= len(vals):
             continue
 
