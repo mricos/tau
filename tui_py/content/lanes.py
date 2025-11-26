@@ -137,6 +137,9 @@ class Lane:
         """Set pinned content (for pinned lanes)."""
         self.content = lines if lines else []
 
+    # Maximum content lines to prevent unbounded growth
+    MAX_CONTENT_LINES = 1000
+
     def append_content(self, line: str, color: int = 0):
         """Append line to pinned content with optional color."""
         if self.content is None:
@@ -145,6 +148,11 @@ class Lane:
             self.content_colors = []
         self.content.append(line)
         self.content_colors.append(color)
+
+        # Trim to prevent unbounded growth
+        if len(self.content) > self.MAX_CONTENT_LINES:
+            self.content = self.content[-self.MAX_CONTENT_LINES:]
+            self.content_colors = self.content_colors[-self.MAX_CONTENT_LINES:]
 
     def clear_content(self):
         """Clear pinned content."""

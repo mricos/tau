@@ -84,6 +84,20 @@ def get_completions_rich(buffer: str, category_filter: Optional[str] = None) -> 
                 type="argument"
             ))
 
+        # If no argument completions but command expects params, show hint
+        if not items and cmd_def.params and arg_index - 1 < len(cmd_def.params):
+            param = cmd_def.params[arg_index - 1]
+            hint_text = f"<{param.name}>"
+            items.append(CompletionItem(
+                text=hint_text,
+                description=param.description[:40],
+                category=cmd_def.category.category_name,
+                color=cmd_def.category.color,
+                full_help=cmd_def.format_help(show_osc=False),
+                type="argument"
+            ))
+
+        # If command takes no args or all args provided, return empty (hide popup)
         return items
 
 

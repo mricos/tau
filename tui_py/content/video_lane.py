@@ -94,20 +94,17 @@ class VideoLane:
         if cache_path.exists():
             try:
                 if self._load_cached_strip(cache_path):
-                    print(f"Loaded cached video strip: {cache_path.name}")
                     return True
-            except Exception as e:
-                print(f"Warning: Failed to load cache, regenerating: {e}")
+            except Exception:
+                pass  # Failed to load cache, regenerate
 
         # Generate new strip
-        print(f"Generating video thumbnail strip (sampling at {self.sampling_interval} fps)...")
         if self._generate_thumbnail_strip():
             # Save to cache
             try:
                 self._save_cached_strip(cache_path)
-                print(f"Cached video strip: {cache_path}")
-            except Exception as e:
-                print(f"Warning: Failed to save cache: {e}")
+            except Exception:
+                pass  # Cache save failed, continue anyway
             return True
 
         return False
@@ -193,11 +190,9 @@ class VideoLane:
                 sampling_interval=self.sampling_interval
             )
 
-            print(f"Generated {len(frames)} thumbnails from {duration:.1f}s video")
             return True
 
-        except Exception as e:
-            print(f"Error generating thumbnail strip: {e}")
+        except Exception:
             return False
 
     def _frame_to_ascii(self, frame, size: int) -> List[str]:
@@ -277,8 +272,7 @@ class VideoLane:
 
             return True
 
-        except Exception as e:
-            print(f"Error loading cached strip: {e}")
+        except Exception:
             return False
 
     def get_frame_at_time(self, t: float) -> Optional[List[str]]:

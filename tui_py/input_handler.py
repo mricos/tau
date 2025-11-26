@@ -1,7 +1,7 @@
 """
 Input handling for tau TUI.
 
-Centralizes keyboard input handling for normal and CLI modes.
+Centralizes keyboard input handling for normal, CLI, modal, and sidebar modes.
 """
 
 import curses
@@ -11,6 +11,8 @@ from typing import Callable, Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from tau_lib.core.state import AppState
     from repl_py.cli.manager import CLIManager
+    from tui_py.rendering.sidebar import SidebarState
+    from tui_py.rendering.modal import ModalState
 
 
 # Shift+number key mapping (standard US keyboard)
@@ -36,6 +38,8 @@ class InputHandler:
         cli: 'CLIManager',
         execute_command: Callable[[str], str],
         show_help: Callable[[], None],
+        sidebar: 'SidebarState' = None,
+        modal: 'ModalState' = None,
     ):
         """
         Initialize input handler.
@@ -45,11 +49,15 @@ class InputHandler:
             cli: CLI manager instance
             execute_command: Function to execute CLI commands
             show_help: Function to display help
+            sidebar: Optional sidebar state for toggle/navigation
+            modal: Optional modal state for dialog input handling
         """
         self.state = state
         self.cli = cli
         self.execute_command = execute_command
         self.show_help = show_help
+        self.sidebar = sidebar
+        self.modal = modal
 
     def handle_key(self, key: int) -> bool:
         """
@@ -61,6 +69,10 @@ class InputHandler:
         Returns:
             True to continue, False to quit
         """
+        # Modal takes priority when visible
+        if self.modal and self.modal.visible:
+            return self._handle_modal_key(key)
+
         # Help (only '?', not 'h')
         if key == ord('?'):
             self.show_help()
@@ -78,6 +90,10 @@ class InputHandler:
         # Quit (only 'Q' - Shift+Q, not lowercase 'q' to prevent accidental quit)
         if key == ord('Q'):
             return False
+
+        # Sidebar toggle (backslash '\' or Tab when not in CLI)
+        if key == ord('\\') or key == ord('\t'):
+            return self._handle_sidebar_toggle()
 
         # Video popup toggle
         if key == ord('V'):
@@ -132,6 +148,87 @@ class InputHandler:
             self.cli.add_output("No video loaded (use :video_load <path>)")
         return True
 
+    def _handle_sidebar_toggle(self) -> bool:
+        """Handle sidebar toggle (Tab or backslash when not in CLI mode)."""
+        if not self.sidebar:
+            return True
+
+        self.sidebar.toggle_visibility()
+        status = "visible" if self.sidebar.visible else "hidden"
+        self.cli.add_output(f"Sidebar: {status}")
+        return True
+
+    def _handle_modal_key(self, key: int) -> bool:
+        """
+        Handle key input when modal is visible.
+
+        Modal takes priority over all other input modes.
+        """
+        if not self.modal:
+            return True
+
+        # ESC - close modal (cancel action)
+        if key == 27:
+            self.modal.close("cancel", None)
+            return True
+
+        # Enter - activate selected button
+        if key in (10, curses.KEY_ENTER):
+            action, value = self.modal.activate_selected()
+            self.modal.close(action, value)
+            return True
+
+        # Tab or arrow keys - navigate buttons
+        if key == ord('\t') or key == curses.KEY_RIGHT:
+            self.modal.next_button()
+            return True
+
+        if key == curses.KEY_LEFT:
+            self.modal.prev_button()
+            return True
+
+        # Up/Down - for SELECT type, navigate options
+        if key == curses.KEY_UP:
+            from tui_py.rendering.modal import ModalType
+            if self.modal.modal_type == ModalType.SELECT:
+                self.modal.prev_option()
+            return True
+
+        if key == curses.KEY_DOWN:
+            from tui_py.rendering.modal import ModalType
+            if self.modal.modal_type == ModalType.SELECT:
+                self.modal.next_option()
+            return True
+
+        # For INPUT type modals, handle text input
+        from tui_py.rendering.modal import ModalType
+        if self.modal.modal_type == ModalType.INPUT:
+            # Backspace
+            if key in (curses.KEY_BACKSPACE, 127, 8):
+                self.modal.handle_backspace()
+                return True
+
+            # Delete
+            if key == curses.KEY_DC:
+                self.modal.handle_delete()
+                return True
+
+            # Home/End
+            if key == curses.KEY_HOME:
+                self.modal.move_cursor_home()
+                return True
+
+            if key == curses.KEY_END:
+                self.modal.move_cursor_end()
+                return True
+
+            # Printable characters
+            if 32 <= key <= 126:
+                self.modal.handle_char(chr(key))
+                return True
+
+        return True
+
     def _handle_cli_key(self, key: int) -> bool:
         """Handle key when in CLI mode."""
         # ESC key - hide completions if visible, otherwise exit CLI
@@ -173,10 +270,27 @@ class InputHandler:
                 self.cli.move_cursor(1)
                 self.cli.update_completions_rich()
 
-        # Tab key - accept selected completion if popup is visible
+        # Tab key - show completions if hidden, drill/accept based on context
         elif key == ord('\t'):
             if self.cli.completions_visible:
-                self.cli.accept_completion()
+                # If buffer is empty/short and no category filter, we're browsing categories
+                buffer = self.cli.input_buffer.strip()
+                in_category_browse = (len(buffer) <= 1 and self.cli.current_category is None)
+
+                if in_category_browse:
+                    # Get selected category name and populate buffer
+                    selected = self.cli.get_selected_completion()
+                    if selected:
+                        self.cli.input_buffer = selected.text
+                        self.cli.cursor_pos = len(selected.text)
+                    # Drill into the category to show its commands
+                    self.cli.drill_into_category()
+                else:
+                    # Accept the selected command/argument
+                    self.cli.accept_completion()
+                    self.cli.update_completions_rich()
+            else:
+                # Show completions on Tab press
                 self.cli.update_completions_rich()
 
         # Home/End keys
@@ -201,16 +315,38 @@ class InputHandler:
 
     def _handle_cli_enter(self):
         """Handle Enter key in CLI mode."""
+        buffer = self.cli.input_buffer.strip()
+
+        # If completions visible and buffer has arguments (space in it),
+        # or buffer exactly matches a command, submit instead of completing
+        should_submit = False
         if self.cli.completions_visible:
+            if ' ' in buffer:
+                # Has arguments - submit
+                should_submit = True
+            elif buffer:
+                # Check if buffer exactly matches a registered command
+                from tau_lib.core.commands_api import COMMAND_REGISTRY
+                if COMMAND_REGISTRY.get(buffer):
+                    should_submit = True
+
+        if self.cli.completions_visible and not should_submit:
+            # Accept the completion
             self.cli.accept_completion()
             self.cli.update_completions_rich()
         else:
+            # Submit the command
+            self.cli.hide_completions()
             cmd = self.cli.submit()
             if cmd:
+                # Log just the command as an event
+                self.cli.add_output(f":{cmd}", record_event=True)
+
                 output = self.execute_command(cmd)
                 if output:
+                    # Output goes to CLI area but not to events lane
                     for line in output.split('\n'):
-                        self.cli.add_output(line)
+                        self.cli.add_output(line, record_event=False)
                     if cmd == "clear":
                         self.cli.clear_output()
 

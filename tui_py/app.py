@@ -24,6 +24,9 @@ from tui_py.rendering.waveform import render_waveform_envelope, render_waveform_
 from tui_py.rendering.pinned import render_pinned_compact, render_pinned_expanded
 from tui_py.rendering.header import render_header
 from tui_py.rendering.cli import CLIRenderer
+from tui_py.rendering.splash import SplashState, SplashRenderer
+from tui_py.rendering.sidebar import SidebarState, SidebarRenderer, create_default_panels
+from tui_py.rendering.modal import ModalState, ModalRenderer
 from tui_py.layout import compute_layout, get_special_lanes_info, get_max_special_lanes_height
 from tui_py.input_handler import InputHandler
 from tau_lib.core.project import TauProject
@@ -31,7 +34,9 @@ from tau_lib.integration.tscale_runner import TscaleRunner
 
 
 REFRESH_HZ = 30  # Display refresh rate
-CLI_POLL_MS = 5  # CLI input polling rate (ms) - fast for tight timing
+# Timing constants
+CLI_POLL_MS = 16      # CLI input polling when active (~60fps max)
+IDLE_POLL_MS = 100    # Idle polling when nothing happening (~10fps)
 
 
 class App:
@@ -39,7 +44,7 @@ class App:
 
     def __init__(self, audio_path: str = None, project_dir: str = None, context_dir: str = None, no_video: bool = False):
         """
-        Initialize application.
+        Minimal initialization - just store args. Heavy init happens in TUI with splash.
 
         Args:
             audio_path: Optional audio file to load (auto-runs tscale if needed)
@@ -47,105 +52,180 @@ class App:
             context_dir: Optional context directory (default: ~/recordings/)
             no_video: Disable video features
         """
-        # Initialize project
-        print("Initializing tau...")
-        self.project = TauProject(project_dir)
+        # Store args for deferred initialization
+        self._init_args = {
+            'audio_path': audio_path,
+            'project_dir': project_dir,
+            'context_dir': context_dir,
+            'no_video': no_video,
+        }
 
-        # Show project info
-        info = self.project.get_info()
-        print(f"Project: {info['project_dir']}")
-        print(f"Session: {info['current_session']}")
-        if info['audio_files']:
-            print(f"Audio: {', '.join(info['audio_files'][:3])}{' ...' if len(info['audio_files']) > 3 else ''}")
-        if info['available_sessions']:
-            print(f"Sessions: {', '.join(info['available_sessions'])}")
-
-        # Initialize state
-        self.state = AppState()
-
-        # Set context directory
-        if context_dir:
-            from pathlib import Path
-            self.state.context_dir = Path(context_dir).expanduser().resolve()
-        # else: will use default ~/recordings/ from __post_init__
-
-        # Create context directory if it doesn't exist
-        self.state.context_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Context directory: {self.state.context_dir}")
-
-        # Video feature detection (lazy, non-blocking)
-        if not no_video:
-            self._detect_video_features()
-        else:
-            self.state.features.video_enabled = False
-            print("Video features disabled (--no-video)")
-
-        # Initialize CLI
-        self.cli = CLIManager()
-
-        # Set up event/log callbacks BEFORE first output
-        self.cli.set_event_callback(lambda text, delta_ms: self.state.lanes.add_event(text, delta_ms))
-        self.cli.set_log_callback(lambda text, level, delta_ms: self.state.lanes.add_log(text, level, delta_ms))
-
-        self.cli.add_output("tau - Terminal Audio Workstation - Type 'quickstart' for tutorial, 'help' for commands")
-        self.cli.add_output(f"System ready. Session: {info['current_session']} | Lane 0=logs, Lane 9=events", is_log=True, log_level="INFO")
-
-        # Initialize CLI renderer (will be set up properly in run() with state)
+        # Minimal state - will be fully initialized in _deferred_init
+        self.state = None
+        self.project = None
+        self.cli = None
         self.cli_renderer = None
+        self.input_handler = None
 
-        # Initialize command registry (new system)
-        register_all_commands(self.state)
+        # UI state objects (available immediately)
+        self.splash = SplashState(visible=True)
+        self.sidebar = SidebarState(visible=False)
+        self.modal = ModalState(visible=False)
 
-        # Store project and CLI references for commands and rendering
-        self.state.project = self.project
-        self.state.cli = self.cli  # Make CLI accessible from state
+        # Track initialization state
+        self._initialized = False
+        self._last_saved_hash = None  # For dirty checking
 
-        # Set up rich completion provider
-        from tui_py.ui.completion import get_completions_rich
-        self.cli.set_completion_rich_provider(get_completions_rich)
+    def _deferred_init(self, scr):
+        """
+        Heavy initialization with splash screen updates.
+        Called from run() after TUI is displayed.
+        """
+        args = self._init_args
+        h, w = scr.getmaxyx()
 
-        # Initialize input handler
-        self.input_handler = InputHandler(
-            state=self.state,
-            cli=self.cli,
-            execute_command=self._execute_command,
-            show_help=self._show_help,
-        )
+        # Reuse single renderer for all updates
+        splash_renderer = SplashRenderer(self.splash)
 
-        # Try to load local config
-        local_config = self.project.load_local_config()
-        if self.project.get_config_file().exists():
-            print(f"Loaded config from {self.project.get_config_file().relative_to(self.project.project_dir)}")
-            # Apply config (TODO: implement config application)
+        def update_splash(msg, progress):
+            nonlocal h, w
+            h, w = scr.getmaxyx()  # Update size in case terminal resized
+            self.splash.set_step(msg, progress)
+            self.splash.tick()
+            splash_renderer.render(scr, h, w)
+            scr.refresh()
+            # Quick key check to allow early dismiss (but continue loading)
+            scr.nodelay(True)
+            scr.getch()
 
-        # Load or generate data
-        if audio_path:
-            self._load_audio(audio_path)
-        else:
-            # Try to load from last session
-            session = self.project.load_session_state()
-            if session and 'audio_file' in session:
-                print(f"Restoring session: {session['audio_file']}")
-                self._load_audio(session['audio_file'])
-                # Restore position and markers
-                if 'position' in session:
-                    self.state.transport.position = session['position']
-                if 'markers' in session:
-                    for m in session['markers']:
-                        self.state.markers.add(m['time'], m['label'])
+        try:
+            # Step 1: Initialize project
+            update_splash("Initializing project...", 0.1)
+            self.project = TauProject(args['project_dir'])
+
+            # Step 2: Initialize state
+            update_splash("Creating application state...", 0.2)
+            self.state = AppState()
+
+            # Set context directory
+            if args['context_dir']:
+                from pathlib import Path
+                self.state.context_dir = Path(args['context_dir']).expanduser().resolve()
+            self.state.context_dir.mkdir(parents=True, exist_ok=True)
+
+            # Step 3: Video detection
+            update_splash("Detecting video features...", 0.25)
+            if not args['no_video']:
+                self._detect_video_features()
             else:
-                # No session, look for latest data
-                latest = self.project.trs.query_latest(type="data", kind="raw")
-                if latest:
-                    print(f"Loading latest data: {latest.filepath.name}")
-                    self.state.data_buffer = load_data_file(str(latest.filepath))
-                    self.state.transport.duration = compute_duration(self.state.data_buffer)
-                    print(f"Loaded {len(self.state.data_buffer)} samples, duration {self.state.transport.duration:.3f}s")
-                else:
-                    print("No data found. Use :load <audio.wav> to process audio file.")
-                    # Create minimal empty data
-                    self.state.data_buffer = [(0.0, [0.0, 0.0, 0.0, 0.0])]
-                    self.state.transport.duration = 0.0
+                self.state.features.video_enabled = False
+
+            # Step 4: Initialize CLI
+            update_splash("Setting up CLI...", 0.3)
+            self.cli = CLIManager()
+            self.cli.set_event_callback(lambda text, delta_ms: self.state.lanes.add_event(text, delta_ms))
+            self.cli.set_log_callback(lambda text, level, delta_ms: self.state.lanes.add_log(text, level, delta_ms))
+
+            # Step 5: Register commands
+            update_splash("Registering commands...", 0.4)
+            register_all_commands(self.state)
+            self.state.project = self.project
+            self.state.cli = self.cli
+
+            # Set up rich completion provider
+            from tui_py.ui.completion import get_completions_rich
+            self.cli.set_completion_rich_provider(get_completions_rich)
+
+            # Step 6: Initialize input handler
+            update_splash("Setting up input handler...", 0.5)
+            self.input_handler = InputHandler(
+                state=self.state,
+                cli=self.cli,
+                execute_command=self._execute_command,
+                show_help=self._show_help,
+                sidebar=self.sidebar,
+                modal=self.modal,
+            )
+
+            # Step 7: Load config
+            update_splash("Loading configuration...", 0.55)
+            local_config = self.project.load_local_config()
+
+            # Step 8: Load audio/data
+            audio_path = args['audio_path']
+            if audio_path:
+                update_splash(f"Loading audio: {audio_path}...", 0.6)
+                self._load_audio(audio_path)
+            else:
+                # Try to load from last session
+                update_splash("Checking for saved session...", 0.6)
+                session = self.project.load_session_state()
+                audio_file = session.get('audio_file') if session else None
+
+                if audio_file:
+                    update_splash(f"Restoring session: {audio_file}...", 0.7)
+                    try:
+                        self._load_audio(audio_file)
+                        if 'position' in session:
+                            self.state.transport.position = session['position']
+                        if 'markers' in session:
+                            for m in session['markers']:
+                                self.state.markers.add(m['time'], m['label'])
+                    except (FileNotFoundError, Exception):
+                        audio_file = None  # Failed, try latest data
+
+                if not audio_file or not self.state.data_buffer or len(self.state.data_buffer) <= 1:
+                    update_splash("Looking for data files...", 0.8)
+                    latest = self.project.trs.query_latest(type="data", kind="raw")
+                    if latest:
+                        update_splash(f"Loading: {latest.filepath.name}...", 0.85)
+                        self.state.data_buffer = load_data_file(str(latest.filepath))
+                        self.state.transport.duration = compute_duration(self.state.data_buffer)
+                    else:
+                        # Create minimal empty data
+                        self.state.data_buffer = [(0.0, [0.0, 0.0, 0.0, 0.0])]
+                        self.state.transport.duration = 0.0
+
+            # Step 9: Initialize sidebar panels
+            update_splash("Setting up UI panels...", 0.9)
+            self.sidebar.panels = create_default_panels(self.state)
+
+            # Step 10: Finalize
+            update_splash("Finalizing...", 0.95)
+            self.cli_renderer = CLIRenderer(self.state)
+
+            # Add welcome message
+            info = self.project.get_info()
+            self.cli.add_output("tau - Terminal Audio Workstation - Type 'quickstart' for tutorial, 'help' for commands")
+            self.cli.add_output(f"Session: {info['current_session']} | Lane 0=logs, Lane 9=events", is_log=True, log_level="INFO")
+
+            # Done!
+            self.splash.set_ready()
+            SplashRenderer(self.splash).render(scr, h, w)
+            scr.refresh()
+
+            self._initialized = True
+
+            # Set initial hash for dirty checking (so we only save if changed)
+            self._last_saved_hash = self._get_session_hash({
+                'audio_file': self.state.audio_input,
+                'data_file': self.state.data_file,
+                'position': round(self.state.transport.position, 3),
+                'markers': [{'time': m.time, 'label': m.label} for m in self.state.markers.all()],
+                'kernel_params': {
+                    'tau_a': self.state.kernel.tau_a,
+                    'tau_r': self.state.kernel.tau_r,
+                    'threshold': self.state.kernel.threshold,
+                    'refractory': self.state.kernel.refractory,
+                },
+                'display_mode': self.state.display.mode,
+            })
+
+        except Exception as e:
+            self.splash.set_error(str(e))
+            SplashRenderer(self.splash).render(scr, h, w)
+            scr.refresh()
+            raise
 
     def _detect_video_features(self):
         """Detect video feature availability (non-blocking, graceful degradation)."""
@@ -153,11 +233,10 @@ class App:
             import cv2
             self.state.features.video_available = True
             self.state.features.video_enabled = True
-            print(f"✓ Video features available (opencv-python {cv2.__version__})")
+            # Note: cv2.__version__ available if needed for logging
         except ImportError:
             self.state.features.video_available = False
             self.state.features.video_enabled = False
-            print("Video features unavailable (install opencv-python for video playback)")
 
     def _load_audio(self, audio_path: str):
         """Load audio file (auto-runs tscale if needed)."""
@@ -177,14 +256,11 @@ class App:
         if not audio_file.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_file}")
 
-        print(f"Loading audio: {audio_file}")
-
         # Check for existing data or generate
         runner = TscaleRunner(self.project.trs)
 
         try:
             data_path = runner.find_or_generate(audio_file, self.state.kernel)
-            print(f"Using data: {data_path.name}")
 
             # Load data
             self.state.data_buffer = load_data_file(str(data_path))
@@ -192,26 +268,137 @@ class App:
             self.state.audio_input = str(audio_file)
             self.state.data_file = str(data_path)
 
-            print(f"Loaded {len(self.state.data_buffer)} samples, duration {self.state.transport.duration:.3f}s")
-
             # Load audio to tau-engine for playback (lane 1 by default)
-            if self.state.transport.load_audio_for_lane(1, audio_file):
-                print(f"✓ Audio loaded to tau-engine for playback")
+            self.state.transport.load_audio_for_lane(1, audio_file)
 
         except Exception as e:
-            print(f"Error processing audio: {e}")
             raise
+
+    def _render_fade_in_interface(self, scr, h: int, w: int, fade_progress: float):
+        """Render main interface elements fading in during transition."""
+        # Only show elements based on fade progress (0.3 to 1.0 maps to 0.0 to 1.0)
+        normalized = (fade_progress - 0.3) / 0.7
+
+        # Apply dim attribute for early fade stages
+        attr = curses.A_DIM if normalized < 0.7 else 0
+
+        # Header bar fades in first
+        if normalized > 0.2:
+            header_text = " tau - Terminal Audio Workstation "
+            header_attr = curses.color_pair(4) | attr
+            x = (w - len(header_text)) // 2
+            safe_addstr(scr, 0, max(0, x), header_text, header_attr)
+
+        # Status line at bottom fades in mid
+        if normalized > 0.4:
+            status = " Ready | Press ':' for CLI | '?' for help "
+            status_attr = curses.color_pair(7) | attr
+            x = (w - len(status)) // 2
+            safe_addstr(scr, h - 1, max(0, x), status, status_attr)
+
+        # Waveform area outline fades in later
+        if normalized > 0.6:
+            # Draw a simple border hint
+            border_char = "─"
+            border_attr = curses.color_pair(7) | curses.A_DIM
+            border_y = h // 3
+            border_line = border_char * (w - 4)
+            safe_addstr(scr, border_y, 2, border_line, border_attr)
 
     def run(self, stdscr):
         """Main curses loop."""
-        stdscr.nodelay(True)
-        # Start with CLI-optimized timeout (fast input response)
-        stdscr.timeout(CLI_POLL_MS)
-
+        # Initialize colors first (needed for splash)
         init_colors()
 
-        # Initialize CLI renderer with state
-        self.cli_renderer = CLIRenderer(self.state)
+        # Create splash renderer once (reuse to avoid object churn)
+        splash_renderer = SplashRenderer(self.splash)
+
+        # Show splash immediately
+        stdscr.nodelay(True)
+        stdscr.timeout(50)  # Fast updates during splash
+        h, w = stdscr.getmaxyx()
+        splash_renderer.render(stdscr, h, w)
+        stdscr.refresh()
+
+        # Do heavy initialization with splash updates
+        self._deferred_init(stdscr)
+
+        # Initialize startup tips system from config (after state is initialized)
+        if self.state:
+            self.splash.init_startup_tips(
+                show_tips=self.state.features.show_startup_tips,
+                tips_count=self.state.features.startup_tips_count,
+                require_enter=self.state.features.require_enter_to_advance
+            )
+            # Set video feature flag for tip filtering
+            if self.splash.startup:
+                self.splash.startup.set_feature('video', self.state.features.video_enabled)
+
+        # Wait for Enter key to dismiss splash (if ready)
+        if self.splash.ready:
+            stdscr.timeout(100)
+            while True:
+                self.splash.tick()
+                h, w = stdscr.getmaxyx()
+                splash_renderer.render(stdscr, h, w)
+                stdscr.refresh()
+                key = stdscr.getch()
+
+                # Check for dismiss key
+                if self.splash.require_enter:
+                    # Only Enter key (10 = newline, 13 = carriage return)
+                    if key == 10 or key == 13 or key == curses.KEY_ENTER:
+                        break
+                else:
+                    # Any key
+                    if key != -1:
+                        break
+
+                # Auto-dismiss after delay (disabled when require_enter is True)
+                if not self.splash.require_enter and self.splash.should_dismiss():
+                    break
+
+        # Show tips pages if enabled
+        if self.splash.should_show_tips():
+            self.splash.enter_tips_page()
+            stdscr.timeout(100)
+
+            while self.splash.should_show_tips():
+                h, w = stdscr.getmaxyx()
+                splash_renderer.render_tips_page(stdscr, h, w)
+                key = stdscr.getch()
+
+                # Enter advances to next tip
+                if key == 10 or key == 13 or key == curses.KEY_ENTER:
+                    self.splash.advance_tip_page()
+                # Escape skips all tips
+                elif key == 27:  # Escape
+                    break
+
+        # Fade out splash and fade in interface
+        self.splash.start_fade()
+        stdscr.timeout(16)  # ~60fps for smooth fade
+        while not self.splash.is_fade_complete():
+            self.splash.update_fade()
+            h, w = stdscr.getmaxyx()
+
+            # Render splash (fading out)
+            splash_renderer.render(stdscr, h, w)
+
+            # As splash fades, start showing interface elements with increasing opacity
+            fade_in = self.splash.fade_progress
+            if fade_in > 0.3:
+                # Start rendering main interface behind (it will show through as splash fades)
+                self._render_fade_in_interface(stdscr, h, w, fade_in)
+
+            stdscr.refresh()
+            stdscr.getch()  # consume any keys during fade
+
+        # Hide splash completely
+        self.splash.hide()
+
+        # Switch to CLI-optimized timeout
+        stdscr.timeout(CLI_POLL_MS)
 
         self.state.transport.last_update = time.time()
 
@@ -226,8 +413,15 @@ class App:
         # Dirty flags for selective rendering
         need_full_redraw = True
         last_cli_buffer = ""
+        last_h, last_w = 0, 0
+
+        # Performance monitor
+        from tui_py.rendering.perf_monitor import get_monitor
+        perf = get_monitor()
 
         while True:
+            perf.frame_start()
+
             # Check terminal size
             h, w = stdscr.getmaxyx()
             if w < lc.min_terminal_width or h < lc.min_terminal_height:
@@ -237,29 +431,48 @@ class App:
                 stdscr.refresh()
                 time.sleep(0.1)
                 continue
+
+            # Check if terminal resized
+            if h != last_h or w != last_w:
+                need_full_redraw = True
+                last_h, last_w = h, w
+
             # Update transport
-            if self.state.transport.playing:
+            is_playing = self.state.transport.playing
+            if is_playing:
                 self.state.transport.update()
                 need_full_redraw = True  # Waveform position changed
-
-            # Get screen size
-            h, w = stdscr.getmaxyx()
 
             # Check if CLI buffer changed (for CLI-only updates)
             cli_buffer_changed = (last_cli_buffer != self.cli.input_buffer)
             if cli_buffer_changed:
                 last_cli_buffer = self.cli.input_buffer
+                need_full_redraw = True  # Redraw on any input
 
-            # Smart rendering: only full redraw when needed
-            # In CLI mode with no playback, only redraw CLI sections
-            if need_full_redraw or not self.cli.mode:
-                # Full screen redraw
-                stdscr.erase()
-                need_full_redraw = False
-            elif cli_buffer_changed:
-                # CLI-only update: just redraw CLI prompt and status
-                # Don't erase - just overwrite CLI sections
-                pass  # Will render CLI below
+            # Adjust timeout based on activity
+            if is_playing or self.cli.mode:
+                stdscr.timeout(CLI_POLL_MS)  # Fast polling when active
+            else:
+                stdscr.timeout(IDLE_POLL_MS)  # Slow polling when idle
+
+            # Skip rendering if nothing changed (idle optimization)
+            if not need_full_redraw and not cli_buffer_changed:
+                # Just wait for input, don't render
+                perf.frame_end()
+                key = stdscr.getch()
+                if key == -1:
+                    continue
+                # Got input - trigger redraw and process
+                need_full_redraw = True
+                if not self.input_handler.handle_key(key):
+                    break
+                continue
+
+            # Full screen redraw
+            perf.section_start('erase')
+            stdscr.erase()
+            perf.section_end()
+            need_full_redraw = False
 
             # === LAYOUT (CLI OUTPUT GROWS UPWARD) ===
             # Layout from top to bottom:
@@ -314,20 +527,27 @@ class App:
             # Calculate data lanes viewport height (uses remaining space)
             data_viewport_h = max(lc.min_data_viewport, available_for_data_and_cli - cli_output_height)
 
-            # Render sections (skip expensive parts in CLI-only mode)
+            # Render sections
             y_cursor = 0
 
-            if not self.cli.mode or need_full_redraw:
-                # Full render when not in CLI mode or when redraw needed
-                # 1. HEADER
-                render_header(stdscr, self.state, w)
-                y_cursor += lc.header_height
+            # 1. HEADER
+            perf.section_start('header')
+            render_header(stdscr, self.state, w)
+            perf.section_end()
+            y_cursor += lc.header_height
 
-                # 2. DATA LANES 1-8 (scrollable viewport) - EXPENSIVE
-                self._render_data_lanes(stdscr, y_cursor, data_viewport_h, w)
-                y_cursor += data_viewport_h
+            # 2. DATA LANES 1-8 (scrollable viewport)
+            perf.section_start('lanes')
+            self._render_data_lanes(stdscr, y_cursor, data_viewport_h, w)
+            perf.section_end()
+            y_cursor += data_viewport_h
 
-            # 3. CLI OUTPUT or COMPLETIONS (grows upward from prompt)
+            # Calculate fixed positions from bottom up
+            status_line_y = h - 1
+            cli_prompt_y = status_line_y - special_lanes_height - lc.cli_prompt_offset
+
+            # 3. CLI OUTPUT or COMPLETIONS
+            perf.section_start('cli')
             cli_output_y = lc.header_height + data_viewport_h
 
             # Clear CLI output area to prevent ghosting (especially in CLI-only update mode)
@@ -341,21 +561,13 @@ class App:
                     stdscr.clrtoeol()
 
             if self.cli.completions_visible:
-                # Render completion popup
-                self.cli_renderer.render_completions(stdscr, cli_output_y, w)
+                # Render completion popup ABOVE the prompt line
+                completion_height = self.cli_renderer.render_completions(stdscr, cli_prompt_y, w)
+                y_cursor = cli_prompt_y
             else:
                 # Render normal CLI output
                 self._render_cli_output(stdscr, cli_output_y, cli_output_height, w, cli_output_lines)
-
-            y_cursor = cli_output_y + cli_output_height
-
-            # 5. SPECIAL LANES: Events (lane 9) then Logs (lane 0) - between prompt and status
-            # Calculate position from bottom up: status_line + special_lanes
-            status_line_y = h - 1
-
-            # 4. CLI PROMPT (1 row) - positioned above status with feedback area below
-            cli_prompt_y = status_line_y - special_lanes_height - lc.cli_prompt_offset
-            self.cli_renderer.render_prompt(stdscr, cli_prompt_y, w)
+                y_cursor = cli_output_y + cli_output_height
 
             # Calculate the maximum possible special lanes area (when both visible)
             max_special_lanes_height = 0
@@ -365,12 +577,20 @@ class App:
                 max_special_lanes_height += logs_lane.HEIGHT_SPECIAL
 
             # Clear the entire special lanes area (to remove old content when toggled off)
+            # But don't clear the prompt line
             if max_special_lanes_height > 0:
                 clear_start_y = status_line_y - max_special_lanes_height
                 for clear_y in range(clear_start_y, status_line_y):
-                    if clear_y >= y_cursor:  # Don't clear above CLI prompt
+                    if clear_y > cli_prompt_y:  # Don't clear prompt or above
                         stdscr.move(clear_y, 0)
                         stdscr.clrtoeol()
+
+            # 4. CLI PROMPT (1 row) - render AFTER clearing to ensure it's visible
+            self.cli_renderer.render_prompt(stdscr, cli_prompt_y, w)
+
+            # 5. COMPLETION STATUS - one-liner BELOW prompt when completions visible
+            if self.cli.completions_visible:
+                self.cli_renderer.render_completion_preview(stdscr, cli_prompt_y + 1, w)
 
             # Render visible special lanes
             if special_lanes_height > 0:
@@ -387,27 +607,51 @@ class App:
 
             # 6. CLI STATUS LINE (1 row at bottom)
             self.cli_renderer.render_status(stdscr, status_line_y, w)
+            perf.section_end()  # end 'cli' section
 
-            # 7. VIDEO POPUP (overlay on top of everything)
+            # 7. SIDEBAR (renders on right side of CLI output area)
+            if self.sidebar.visible:
+                sidebar_x = w - self.sidebar.width
+                sidebar_y = lc.header_height + data_viewport_h
+                sidebar_h = cli_output_height
+                SidebarRenderer(self.state, self.sidebar).render(
+                    stdscr, sidebar_x, sidebar_y, sidebar_h
+                )
+
+            # 8. VIDEO POPUP (overlay on top of everything)
             if self.state.video_popup and self.state.video_popup.visible:
                 self.state.video_popup.render(stdscr, self.state.transport, h, w)
 
-            # Cursor visibility
+            # 9. MODAL DIALOG (overlay on top of everything, highest priority)
+            if self.modal.visible:
+                ModalRenderer(self.modal).render(stdscr, h, w)
+
+            # Cursor visibility (hide cursor when modal visible)
             try:
-                curses.curs_set(1 if self.cli.mode else 0)
+                if self.modal.visible:
+                    curses.curs_set(1)  # Show cursor for modal input
+                else:
+                    curses.curs_set(1 if self.cli.mode else 0)
             except:
                 pass
 
             # Refresh
+            perf.section_start('refresh')
             stdscr.refresh()
+            perf.section_end()
+
+            # End frame timing (after render, before input wait)
+            perf.frame_end()
 
             # Handle input
             key = stdscr.getch()
 
-            # No key - tight loop for rhythm interface
+            # No key - wait for next frame
             if key == -1:
                 continue
 
+            # Got input - will need redraw after processing
+            need_full_redraw = True
             if not self.input_handler.handle_key(key):
                 break  # Quit
 
@@ -641,6 +885,10 @@ class App:
             else:
                 attr = curses.A_DIM
 
+            # Clear line first, then write
+            scr.move(y, 0)
+            scr.clrtoeol()
+
             # Center single-line messages if it's the only line and not too long
             if height == 1 and len(line) < width - 4:
                 padding = (width - len(line)) // 2
@@ -649,10 +897,6 @@ class App:
             else:
                 # Multi-line or long messages: left-aligned with indent
                 safe_addstr(scr, y, 2, line[:width-4], attr)
-
-            # Clear rest of line
-            scr.move(y, 0)
-            scr.clrtoeol()
 
     def _draw_header(self, scr, width):
         """Draw 2-line header with transport and lane status."""
@@ -786,8 +1030,20 @@ class App:
         for line in help_lines:
             self.cli.add_output(line)
 
+    def _get_session_hash(self, session_data: dict) -> str:
+        """Get hash of session data for dirty checking (excludes timestamp)."""
+        import hashlib
+        import json
+        # Exclude timestamp from hash comparison
+        data_for_hash = {k: v for k, v in session_data.items() if k != 'timestamp'}
+        return hashlib.md5(json.dumps(data_for_hash, sort_keys=True).encode()).hexdigest()
+
     def save_state(self):
-        """Save session state to data/sessions/{name}.json."""
+        """Save session state to data/sessions/{name}.json (only if changed)."""
+        # Skip if not fully initialized
+        if not self._initialized or not self.state or not self.project:
+            return
+
         try:
             # Convert absolute paths to relative (relative to project directory)
             from pathlib import Path
@@ -812,12 +1068,12 @@ class App:
                         # Path is not relative to project, keep absolute
                         pass
 
-            # Save session state
+            # Build session state
             session_data = {
                 'timestamp': int(time.time()),
                 'audio_file': audio_file,
                 'data_file': data_file,
-                'position': self.state.transport.position,
+                'position': round(self.state.transport.position, 3),  # Round for stable hash
                 'markers': [
                     {'time': m.time, 'label': m.label}
                     for m in self.state.markers.all()
@@ -830,7 +1086,14 @@ class App:
                 },
                 'display_mode': self.state.display.mode,
             }
+
+            # Check if anything changed
+            current_hash = self._get_session_hash(session_data)
+            if current_hash == self._last_saved_hash:
+                return  # No changes, skip save
+
             self.project.save_session_state(session_data)
+            self._last_saved_hash = current_hash
             print(f"Session saved to {self.project.get_session_file().relative_to(self.project.project_dir)}")
         except Exception as e:
             print(f"Warning: Could not save session: {e}")
@@ -864,46 +1127,48 @@ def main():
 
     args = parser.parse_args()
 
-    # Create app first (before signal handlers)
-    try:
-        app = App(
-            audio_path=args.audio,
-            project_dir=args.project_dir,
-            context_dir=args.context_dir,
-            no_video=args.no_video
-        )
-    except Exception as e:
-        print(f"Error initializing app: {e}")
-        sys.exit(1)
+    # Create app (minimal init - heavy work happens in TUI with splash)
+    app = App(
+        audio_path=args.audio,
+        project_dir=args.project_dir,
+        context_dir=args.context_dir,
+        no_video=args.no_video
+    )
 
     # Setup signal handlers with app reference
     def sigint_handler(sig, frame):
-        # Stop audio playback
-        if app.state.transport.tau:
+        # Stop audio playback if initialized
+        if app.state and app.state.transport.tau:
             try:
                 app.state.transport.tau.stop_all()
             except:
                 pass
-        # Curses will handle the rest
         sys.exit(0)
 
     signal.signal(signal.SIGINT, sigint_handler)
 
     try:
-        # Run curses app
+        # Run curses app (shows splash immediately, then loads)
         curses.wrapper(app.run)
+    except curses.error as e:
+        print(f"Curses error: {e}")
+        import traceback
+        traceback.print_exc()
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
-        # Stop audio and cleanup on exit
-        if app.state.transport.tau:
+        # Quick cleanup on exit - just kill engine, don't send stop commands
+        if app.state and app.state.transport.tau:
             try:
-                app.state.transport.tau.stop_all()
-                # Cleanup auto-started engine
                 if app.state.transport.tau.engine_process:
                     app.state.transport.tau._cleanup_engine()
             except:
                 pass
         app.save_state()
-        print("\nAudio stopped, session saved. Goodbye!")
+        if app._initialized:
+            print("\nGoodbye!")
 
 
 if __name__ == "__main__":
