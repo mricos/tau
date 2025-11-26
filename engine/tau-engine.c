@@ -1394,8 +1394,9 @@ static int engine_init(Engine* E, uint32_t sr, uint32_t frames){
     for (int v=0;v<NUM_VOICES;v++)   voice_init(&E->voices[v], (float)sr);
     recorder_init(&E->recorder);
 
-    // DUPLEX mode: simultaneous playback + capture
-    E->dcfg = ma_device_config_init(ma_device_type_duplex);
+    // PLAYBACK-only mode (use DUPLEX only when recording needed)
+    // Using duplex mode triggers Bluetooth HFP profile switch, killing audio quality
+    E->dcfg = ma_device_config_init(ma_device_type_playback);
     E->dcfg.sampleRate = sr;
 
     // Playback configuration
@@ -1403,10 +1404,8 @@ static int engine_init(Engine* E, uint32_t sr, uint32_t frames){
     E->dcfg.playback.channels = 2;
     E->dcfg.playback.pDeviceID = E->playbackDeviceId;  // NULL = default
 
-    // Capture configuration (for recording)
-    E->dcfg.capture.format   = ma_format_f32;
-    E->dcfg.capture.channels = 2;  // Stereo input
-    E->dcfg.capture.pDeviceID = E->captureDeviceId;    // NULL = default
+    // NOTE: Capture disabled by default to avoid Bluetooth HFP mode switch
+    // TODO: Add RECORD ENABLE command to switch to duplex mode when needed
 
     E->dcfg.dataCallback = data_cb;
     E->dcfg.performanceProfile = ma_performance_profile_low_latency;
