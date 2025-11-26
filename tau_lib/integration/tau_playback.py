@@ -28,15 +28,18 @@ from typing import Optional, Dict
 class TauMultitrack:
     """Direct socket communication with tau-engine for multitrack playback."""
 
-    def __init__(self, socket_path: str = "~/tau/runtime/tau.sock", auto_start: bool = True):
+    def __init__(self, socket_path: str = None, auto_start: bool = True):
         """
         Initialize tau multitrack controller.
 
         Args:
-            socket_path: Path to tau Unix socket (default: ~/tau/runtime/tau.sock)
+            socket_path: Path to tau Unix socket (default: /tmp/tau-{pid}.sock)
             auto_start: Automatically start tau-engine if not running (default: True)
         """
-        self.socket_path = Path(socket_path).expanduser()
+        # Use temp socket unique to this process
+        if socket_path is None:
+            socket_path = f"/tmp/tau-{os.getpid()}.sock"
+        self.socket_path = Path(socket_path)
         self.loaded_tracks: Dict[int, Path] = {}  # track_id -> audio_path
         self.engine_process: Optional[subprocess.Popen] = None
 
@@ -48,15 +51,14 @@ class TauMultitrack:
         """
         Start tau-engine daemon in the background.
 
-        Looks for tau-engine binary in:
-        1. ./engine/tau-engine (relative to this file)
-        2. ~/tau/engine/tau-engine (absolute path)
+        Looks for tau-engine binary relative to project structure.
         """
-        # Find tau-engine binary
+        # Find tau-engine binary relative to project root
+        # tau_lib/integration/tau_playback.py -> ../../engine/tau-engine
         script_dir = Path(__file__).parent
+        project_root = script_dir.parent.parent
         engine_paths = [
-            script_dir / "engine" / "tau-engine",
-            Path("~/tau/engine/tau-engine").expanduser()
+            project_root / "engine" / "tau-engine",
         ]
 
         engine_binary = None
@@ -70,13 +72,13 @@ class TauMultitrack:
                 f"tau-engine binary not found. Searched: {[str(p) for p in engine_paths]}"
             )
 
-        # Ensure runtime directory exists
-        runtime_dir = self.socket_path.parent
-        runtime_dir.mkdir(parents=True, exist_ok=True)
+        # Remove stale socket if it exists
+        if self.socket_path.exists():
+            self.socket_path.unlink()
 
-        # Start tau-engine as background daemon
+        # Start tau-engine as background daemon with our socket path
         self.engine_process = subprocess.Popen(
-            [str(engine_binary)],
+            [str(engine_binary), "--socket", str(self.socket_path)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True
@@ -95,11 +97,26 @@ class TauMultitrack:
             raise ConnectionError("tau-engine started but socket not created")
 
     def _cleanup_engine(self) -> None:
-        """Clean up auto-started tau-engine process."""
+        """Clean up auto-started tau-engine process and socket."""
         if self.engine_process:
             try:
                 self.engine_process.terminate()
-                self.engine_process.wait(timeout=2)
+                self.engine_process.wait(timeout=0.1)  # Quick timeout, don't block
+            except:
+                # Process didn't die quickly, that's fine - OS will clean up
+                pass
+            self.engine_process = None
+
+            # Unregister atexit handler since we've done manual cleanup
+            try:
+                atexit.unregister(self._cleanup_engine)
+            except:
+                pass
+
+        # Remove socket file
+        if self.socket_path.exists():
+            try:
+                self.socket_path.unlink()
             except:
                 pass
 
@@ -130,7 +147,7 @@ class TauMultitrack:
             sock.sendto(cmd.encode(), str(self.socket_path))
 
             # Receive response with timeout
-            sock.settimeout(1.0)
+            sock.settimeout(0.3)  # Fast timeout - don't block on quit
             response, _ = sock.recvfrom(4096)
             return response.decode().strip()
 
@@ -155,7 +172,6 @@ class TauMultitrack:
         """
         audio_path = audio_path.expanduser().resolve()
         if not audio_path.exists():
-            print(f"Audio file not found: {audio_path}")
             return False
 
         result = self._send_command(f"SAMPLE {track_id} LOAD {audio_path}")
@@ -164,7 +180,6 @@ class TauMultitrack:
             self.loaded_tracks[track_id] = audio_path
             return True
         else:
-            print(f"Failed to load: {result}")
             return False
 
     def play_track(self, track_id: int) -> bool:

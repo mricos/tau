@@ -2,15 +2,52 @@
 Tscale runner for ASCII Scope SNN.
 
 Auto-generates tscale output from audio files with current kernel parameters.
+Uses the TscaleAlgorithm from tau_lib.algorithms.tscale.
 """
 
-import subprocess
 import tempfile
-import toml
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional
+
+try:
+    import tomli_w as toml_writer
+except ImportError:
+    toml_writer = None
+
 from tau_lib.data.trs import TRSStorage
 from tau_lib.core.state import KernelParams
+from tau_lib.algorithms.tscale import TscaleAlgorithm, TscaleParams
+from tau_lib.algorithms.tscale.wrapper import NormMode, FilterMode
+
+
+def _dumps_toml(data: dict) -> str:
+    """Serialize dict to TOML string."""
+    if toml_writer:
+        return toml_writer.dumps(data)
+    # Manual fallback for simple flat dicts
+    lines = []
+    for key, val in data.items():
+        if isinstance(val, str):
+            lines.append(f'{key} = "{val}"')
+        elif isinstance(val, bool):
+            lines.append(f'{key} = {str(val).lower()}')
+        else:
+            lines.append(f'{key} = {val}')
+    return '\n'.join(lines)
+
+
+def _kernel_to_tscale_params(kernel: KernelParams) -> TscaleParams:
+    """Convert KernelParams to TscaleParams."""
+    return TscaleParams(
+        tau_a=kernel.tau_a,
+        tau_r=kernel.tau_r,
+        threshold=kernel.threshold,
+        refractory=kernel.refractory,
+        fs=kernel.fs,
+        norm=NormMode.L2,
+        mode=FilterMode.IIR,
+        zero_phase=True,
+    )
 
 
 class TscaleRunner:
@@ -22,32 +59,22 @@ class TscaleRunner:
 
         Args:
             trs: TRS storage instance
-            tscale_bin: Path to tscale binary (default: auto-detect)
+            tscale_bin: Path to tscale binary (default: auto-detect via TscaleAlgorithm)
         """
         self.trs = trs
+        self._algorithm = TscaleAlgorithm()
 
-        # Auto-detect tscale binary if not specified
-        if tscale_bin is None:
-            script_dir = Path(__file__).parent
-            tscale_paths = [
-                script_dir.parent / "tscale" / "tscale",  # ../tscale/tscale
-                Path("./tscale"),                          # ./tscale (for backward compat)
-            ]
+        # Override binary path if specified
+        if tscale_bin is not None:
+            self._algorithm._binary_path = Path(tscale_bin).resolve()
 
-            for path in tscale_paths:
-                if path.exists():
-                    tscale_bin = str(path)
-                    break
-
-            if tscale_bin is None:
+        if not self._algorithm.is_built():
+            # Try to build
+            if not self._algorithm.build():
                 raise FileNotFoundError(
-                    f"tscale binary not found. Searched: {[str(p) for p in tscale_paths]}"
+                    f"tscale binary not found and build failed. "
+                    f"Expected at: {self._algorithm._binary_path}"
                 )
-
-        self.tscale_bin = Path(tscale_bin).resolve()
-
-        if not self.tscale_bin.exists():
-            raise FileNotFoundError(f"tscale binary not found: {self.tscale_bin}")
 
     def run(self,
             audio_file: Path,
@@ -74,68 +101,48 @@ class TscaleRunner:
         if not audio_file.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_file}")
 
-        # Use temp file for tscale output
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.tsv', delete=False) as tmp:
-            tmp_path = Path(tmp.name)
+        # Convert kernel params to tscale params
+        tscale_params = _kernel_to_tscale_params(kernel_params)
+        self._algorithm.params = tscale_params
 
-        try:
-            # Build tscale command
-            cmd = [str(self.tscale_bin), '-i', str(audio_file)]
-            cmd.extend(kernel_params.to_tscale_args())
-            cmd.extend(['-norm', 'l2', '-sym', '-mode', 'iir', '-o', str(tmp_path)])
+        # Run tscale algorithm
+        result = self._algorithm.run(audio_file)
 
-            # Run tscale
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=120  # 2 minute timeout
-            )
+        if not result.success:
+            raise RuntimeError(f"tscale failed: {result.error}")
 
-            if result.returncode != 0:
-                raise RuntimeError(f"tscale failed: {result.stderr}")
+        # Write to TRS
+        data_path = self.trs.write(
+            "data", "raw", "tsv",
+            result.data,
+            timestamp=timestamp,
+            audio=audio_file.stem
+        )
 
-            # Read generated data
-            with open(tmp_path, 'r') as f:
-                tsv_data = f.read()
+        # Also save kernel params used for this data
+        kernel_dict = {
+            'tau_a': kernel_params.tau_a,
+            'tau_r': kernel_params.tau_r,
+            'threshold': kernel_params.threshold,
+            'refractory': kernel_params.refractory,
+            'fs': kernel_params.fs,
+        }
 
-            # Write to TRS
-            data_path = self.trs.write(
-                "data", "raw", "tsv",
-                tsv_data,
-                timestamp=timestamp,
-                audio=audio_file.stem
-            )
+        self.trs.write(
+            "config", "kernel", "toml",
+            _dumps_toml(kernel_dict),
+            timestamp=timestamp,
+            audio=audio_file.stem
+        )
 
-            # Also save kernel params used for this data
-            kernel_dict = {
-                'tau_a': kernel_params.tau_a,
-                'tau_r': kernel_params.tau_r,
-                'threshold': kernel_params.threshold,
-                'refractory': kernel_params.refractory,
-                'fs': kernel_params.fs,
-            }
+        # Copy source audio to TRS
+        self.trs.write_file(
+            "audio", "source",
+            audio_file,
+            timestamp=timestamp
+        )
 
-            self.trs.write(
-                "config", "kernel", "toml",
-                toml.dumps(kernel_dict),
-                timestamp=timestamp,
-                audio=audio_file.stem
-            )
-
-            # Copy source audio to TRS
-            self.trs.write_file(
-                "audio", "source",
-                audio_file,
-                timestamp=timestamp
-            )
-
-            return data_path
-
-        finally:
-            # Clean up temp file
-            if tmp_path.exists():
-                tmp_path.unlink()
+        return data_path
 
     def find_or_generate(self,
                          audio_file: Path,
@@ -173,13 +180,9 @@ class TscaleRunner:
 
     def get_tscale_version(self) -> str:
         """Get tscale version string."""
-        try:
-            result = subprocess.run(
-                [str(self.tscale_bin), '--version'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            return result.stdout.strip()
-        except Exception:
-            return "unknown"
+        return self._algorithm.get_version()
+
+    @property
+    def algorithm(self) -> TscaleAlgorithm:
+        """Access underlying algorithm instance."""
+        return self._algorithm

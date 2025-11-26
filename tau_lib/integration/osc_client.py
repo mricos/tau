@@ -21,8 +21,7 @@ try:
     OSC_AVAILABLE = True
 except ImportError:
     OSC_AVAILABLE = False
-    print("Warning: python-osc not installed. OSC support disabled.")
-    print("Install with: pip install python-osc")
+    # OSC support disabled - python-osc not installed
 
 
 class OSCClient:
@@ -73,8 +72,8 @@ class OSCClient:
 
         try:
             self.client.send_message(address, list(args) if args else [])
-        except Exception as e:
-            print(f"OSC send error: {e}")
+        except Exception:
+            pass  # Silent fail for OSC send errors
 
     def register_handler(self, address: str, handler: Callable):
         """
@@ -106,10 +105,7 @@ class OSCClient:
             )
             self.server_thread.start()
 
-            print(f"OSC server listening on port {self.recv_port}")
-
-        except Exception as e:
-            print(f"Failed to start OSC server: {e}")
+        except Exception:
             self.enabled = False
 
     def stop_server(self):
