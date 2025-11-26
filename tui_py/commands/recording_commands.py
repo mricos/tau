@@ -143,15 +143,25 @@ def register_recording_commands(app_state):
 
 def _get_devices_manager(app_state):
     """Get or create TetraDevices instance."""
-    if not hasattr(app_state, '_tetra_devices'):
-        from tau_lib.core.devices import TetraDevices
-        # Use transport's tau socket if available
-        socket_path = None
-        if hasattr(app_state, 'transport') and hasattr(app_state.transport, '_tau'):
-            tau = app_state.transport._tau
-            if tau:
-                socket_path = tau.socket_path
-        app_state._tetra_devices = TetraDevices(socket_path)
+    from tau_lib.core.devices import TetraDevices
+
+    # Always try to get current socket path from transport's tau instance
+    socket_path = None
+    if hasattr(app_state, 'transport'):
+        transport = app_state.transport
+        # Ensure tau is initialized
+        if hasattr(transport, '_ensure_tau'):
+            transport._ensure_tau()
+        # Get socket path from tau instance
+        if hasattr(transport, 'tau') and transport.tau:
+            socket_path = transport.tau.socket_path
+
+    # Cache the devices manager, but recreate if socket path changed
+    if hasattr(app_state, '_tetra_devices'):
+        if app_state._tetra_devices.socket_path == socket_path:
+            return app_state._tetra_devices
+
+    app_state._tetra_devices = TetraDevices(socket_path)
     return app_state._tetra_devices
 
 

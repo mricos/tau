@@ -63,8 +63,38 @@ DEVICES_TOML = TETRA_CONFIG_DIR / "devices.toml"
 APPS_DIR = TETRA_CONFIG_DIR / "apps"
 PROFILES_DIR = TETRA_CONFIG_DIR / "profiles"
 
-# Default tau-engine socket
-DEFAULT_TAU_SOCKET = Path.home() / "tau" / "runtime" / "tau.sock"
+
+def _find_tau_socket() -> Optional[Path]:
+    """
+    Find an active tau-engine socket.
+
+    Search order:
+    1. TAU_SOCKET environment variable
+    2. ~/tau/runtime/tau.sock (screentool/daemon mode)
+    3. /tmp/tau-*.sock (TauMultitrack per-process sockets)
+    """
+    import glob
+
+    # 1. Environment variable
+    env_socket = os.environ.get('TAU_SOCKET')
+    if env_socket:
+        path = Path(env_socket)
+        if path.exists():
+            return path
+
+    # 2. Standard daemon socket
+    daemon_socket = Path.home() / "tau" / "runtime" / "tau.sock"
+    if daemon_socket.exists():
+        return daemon_socket
+
+    # 3. Per-process sockets in /tmp
+    tmp_sockets = glob.glob("/tmp/tau-*.sock")
+    if tmp_sockets:
+        # Return the most recently modified one
+        tmp_sockets.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        return Path(tmp_sockets[0])
+
+    return None
 
 
 @dataclass
@@ -115,9 +145,14 @@ class TetraDevices:
         Initialize device manager.
 
         Args:
-            socket_path: Path to tau-engine socket (default: ~/tau/runtime/tau.sock)
+            socket_path: Path to tau-engine socket. If None, auto-discovers:
+                         1. TAU_SOCKET env var
+                         2. ~/tau/runtime/tau.sock
+                         3. /tmp/tau-*.sock (most recent)
         """
-        self.socket_path = socket_path or DEFAULT_TAU_SOCKET
+        if socket_path is None:
+            socket_path = _find_tau_socket()
+        self.socket_path = socket_path
         self._aliases: Dict[str, Dict[str, str]] = {}
         self._defaults: Dict[str, Any] = {}
         self._load_device_aliases()
@@ -141,6 +176,8 @@ class TetraDevices:
 
     def _send_command(self, cmd: str, timeout: float = 2.0) -> str:
         """Send command to tau-engine and return response."""
+        if self.socket_path is None:
+            raise ConnectionError("No tau-engine socket found. Is tau-engine running?")
         if not self.socket_path.exists():
             raise ConnectionError(f"tau-engine socket not found: {self.socket_path}")
 
