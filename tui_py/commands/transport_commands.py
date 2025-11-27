@@ -70,7 +70,8 @@ def register_transport_commands(app_state):
     registry.register(CommandDef(
         name="home",
         category=CommandCategory.TRANSPORT,
-        description_short="Jump to start",
+        description_short="Jump to start of timeline",
+        aliases=["start", "rewind", "rw"],
         key_binding="Home",
         handler=lambda: app_state.transport.home()
     ))
@@ -78,7 +79,8 @@ def register_transport_commands(app_state):
     registry.register(CommandDef(
         name="end",
         category=CommandCategory.TRANSPORT,
-        description_short="Jump to end",
+        description_short="Jump to end of timeline",
+        aliases=["finish", "ff"],
         key_binding="End",
         handler=lambda: app_state.transport.end()
     ))

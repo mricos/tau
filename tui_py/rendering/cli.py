@@ -89,7 +89,7 @@ def render_cli_status(scr, y: int, width: int, status_text: str = ""):
     """
     # Default status text if none provided
     if not status_text:
-        status_text = "Press ':' for CLI, '?' for help, 'Q' to quit"
+        status_text = "Type to input │ Tab: complete │ ␣␣: play │ ?: help │ Q: quit"
 
     # Truncate if too long (account for 2-column indent)
     display_text = status_text[:width - 3]
@@ -118,18 +118,25 @@ class CLIRenderer:
         self.status_text = ""
 
     def render_prompt(self, scr, y: int, width: int):
-        """Render CLI prompt line."""
+        """
+        Render CLI prompt line.
+
+        In unified input mode, prompt and cursor are always visible
+        to indicate readiness for input.
+        """
         current_lane = self.state.lanes.get_lane(self.state.lanes.current_lane_id)
         lane_name = current_lane.name if current_lane else "?"
         lane_color = current_lane.color if current_lane else COLOR_PROMPT
 
         # Get input text and cursor from CLI manager (attached to state)
+        # In unified mode, always show input buffer and cursor
         cli = self.state.cli
-        input_text = cli.input_buffer if cli.mode else ""
-        cursor_pos = cli.cursor_pos if cli.mode else 0
+        input_text = cli.input_buffer  # Always show buffer
+        cursor_pos = cli.cursor_pos    # Always show cursor
 
+        # Always pass True for cli_mode to show cursor
         render_cli_prompt(scr, y, width, self.state.lanes.current_lane_id,
-                         lane_name, input_text, cursor_pos, cli.mode, lane_color)
+                         lane_name, input_text, cursor_pos, True, lane_color)
 
     def render_status(self, scr, y: int, width: int):
         """Render CLI status line."""
@@ -142,6 +149,38 @@ class CLIRenderer:
     def clear_status(self):
         """Clear status line text."""
         self.status_text = ""
+
+    def render_transient(self, scr, y: int, width: int):
+        """
+        Render transient status line (single line below prompt).
+
+        This shows temporary feedback like lane toggle messages that
+        shouldn't accumulate in the CLI output area.
+
+        Args:
+            scr: curses screen
+            y: Row position
+            width: Terminal width
+        """
+        cli = self.state.cli
+        text = cli.transient_status
+
+        if not text:
+            # Clear the line when no transient status
+            safe_addstr(scr, y, 0, " " * width, curses.color_pair(BG))
+            return
+
+        # Truncate if too long (account for 2-column indent)
+        display_text = text[:width - 3]
+
+        # Draw with dimmed color, indented by 2 columns
+        safe_addstr(scr, y, 2, display_text, curses.A_DIM | curses.color_pair(COLOR_STATUS))
+
+        # Fill rest of line
+        x_after_text = 2 + len(display_text)
+        remaining = width - x_after_text
+        if remaining > 0:
+            safe_addstr(scr, y, x_after_text, " " * remaining, curses.color_pair(BG))
 
     def render_completions(self, scr, prompt_y: int, width: int):
         """
@@ -287,3 +326,100 @@ class CLIRenderer:
         safe_addstr(scr, y_start, 2, status[:width - 4], curses.A_DIM | curses.color_pair(COLOR_STATUS))
 
         return 1
+
+    def render_completions_below(self, scr, y_start: int, screen_h: int, width: int):
+        """
+        Render completion items BELOW CLI prompt as overlay to bottom of screen.
+
+        Args:
+            scr: curses screen
+            y_start: Y position to start rendering (below prompt)
+            screen_h: Total screen height
+            width: Terminal width
+        """
+        cli = self.state.cli
+
+        if not cli.completions_visible or not cli.completion_items:
+            return
+
+        items = cli.completion_items
+        selected_idx = cli.selected_index
+        total_items = len(items)
+
+        # Calculate available space (from y_start to bottom, leave 1 for status)
+        available_height = screen_h - y_start - 1
+        if available_height < 2:
+            return
+
+        # Reserve lines: 1 for header, 1 for preview, rest for items
+        header_height = 1
+        preview_height = 1
+        max_items = available_height - header_height - preview_height
+
+        # Calculate scrolling window
+        if total_items <= max_items:
+            start_idx = 0
+            num_items = total_items
+        else:
+            half_window = max_items // 2
+            start_idx = max(0, min(selected_idx - half_window, total_items - max_items))
+            num_items = max_items
+
+        y = y_start
+
+        # Clear the overlay area
+        for clear_y in range(y_start, screen_h - 1):
+            scr.move(clear_y, 0)
+            scr.clrtoeol()
+
+        # Render header
+        current_cat = cli.current_category
+        first_item = items[0] if items else None
+        item_type = first_item.type if first_item else "command"
+
+        if item_type == "argument":
+            cmd_name = cli.input_buffer.split()[0] if cli.input_buffer.strip() else ""
+            header = f" {cmd_name}: arguments"
+        elif current_cat:
+            if total_items > max_items:
+                header = f" ← {current_cat.upper()} ({len(items)}): [{start_idx+1}-{start_idx+num_items} of {total_items}]"
+            else:
+                header = f" ← {current_cat.upper()} ({len(items)} commands)"
+        elif item_type == "category":
+            header = f" Categories ({len(items)})"
+        else:
+            if total_items > max_items:
+                header = f" Commands ({len(items)}): [{start_idx+1}-{start_idx+num_items} of {total_items}]"
+            else:
+                header = f" Commands ({len(items)})"
+
+        safe_addstr(scr, y, 1, header, curses.A_BOLD | curses.color_pair(COLOR_STATUS))
+        y += 1
+
+        # Render items
+        from tui_py.ui.completion import format_completion_line
+        for i in range(start_idx, start_idx + num_items):
+            if y >= screen_h - 1 - preview_height:
+                break
+            item = items[i]
+            is_selected = (i == selected_idx)
+
+            line_text = format_completion_line(item, width - 2, is_selected)
+
+            if is_selected:
+                color_attr = curses.A_REVERSE | curses.color_pair(9)
+            else:
+                color_attr = curses.color_pair(item.color)
+
+            safe_addstr(scr, y, 1, line_text[:width - 2], color_attr)
+            y += 1
+
+        # Render preview at bottom (above status line)
+        preview_y = screen_h - 2
+        if selected_idx < len(items):
+            item = items[selected_idx]
+            if item.type == "category":
+                status = f"{item.text}: {item.command_count} commands"
+            else:
+                status = item.description
+            safe_addstr(scr, preview_y, 2, status[:width - 4], curses.A_DIM | curses.color_pair(COLOR_STATUS))

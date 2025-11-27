@@ -26,7 +26,9 @@ class LayoutConfig:
 
     # Dynamic CLI output
     cli_output_min_height: int = 0  # Can collapse when data lanes need space
-    cli_output_max_height: int = 25 # Maximum lines for rich output
+    cli_output_max_height: int = 8  # Maximum lines for rich output
+    cli_float: str = "down"         # "up" = prompt hugs data lanes, "down" = prompt hugs bottom
+    cli_completions: str = "below"  # "above" = completions above prompt, "below" = overlay below
 
     # Completion popup
     completion_max_items: int = 8   # Max visible completion items
@@ -408,6 +410,12 @@ class FeatureFlags:
     show_startup_tips: bool = True      # Show "did you know" tips on startup
     startup_tips_count: int = 3         # Number of tips to show before main UI
     require_enter_to_advance: bool = True  # Require Enter (not any key) to advance
+
+    # Runtime tips request (set by 'tips' command)
+    show_tips_requested: bool = False   # Request to show tips from main loop
+
+    # Redraw flag (set by background threads like OSC to trigger screen update)
+    needs_redraw: bool = False
 
 
 # ========== Top-Level Application State ==========

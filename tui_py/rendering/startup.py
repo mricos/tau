@@ -80,10 +80,9 @@ class StartupConfig:
 STARTUP_TIPS: List[StartupTip] = [
     # Navigation
     StartupTip(
-        title="CLI Mode",
-        content="Enter CLI mode to type commands and search. All tau functionality is accessible through commands.",
+        title="Always Ready",
+        content="No mode switching needed - just start typing. Double-space toggles play/pause. Press Tab to see all available commands.",
         category=TipCategory.CLI,
-        shortcut=":",
         priority=100,
     ),
     StartupTip(
@@ -95,18 +94,18 @@ STARTUP_TIPS: List[StartupTip] = [
     ),
     StartupTip(
         title="Play/Pause",
-        content="Toggle audio playback. Works in any mode.",
+        content="Double-space toggles audio playback. Works anywhere - no need to clear input first.",
         category=TipCategory.PLAYBACK,
-        shortcut="Space",
+        shortcut="Space Space",
         priority=90,
     ),
 
     # Lanes
     StartupTip(
         title="Toggle Lanes",
-        content="Show or hide individual data lanes. Each lane displays a different aspect of your audio analysis.",
+        content="Press 1-8 to toggle lane visibility. Shift+N (like !) cycles display mode: normal → compact → hidden.",
         category=TipCategory.LANES,
-        shortcut="1-8",
+        shortcut="1-8, Shift+N",
         priority=85,
     ),
     StartupTip(
@@ -159,16 +158,16 @@ STARTUP_TIPS: List[StartupTip] = [
     # CLI Commands
     StartupTip(
         title="Load Audio",
-        content="Load any audio file for analysis. Supports WAV, MP3, FLAC, and more.",
+        content="Load any audio file for analysis. Session state is saved to tau/data/sessions/ and restored on next launch.",
         category=TipCategory.CLI,
         command="load <filename>",
         priority=85,
     ),
     StartupTip(
-        title="Quickstart Tutorial",
-        content="Run the interactive tutorial to learn tau basics step by step.",
+        title="Tab Completion",
+        content="Press Tab to see all available commands grouped by category. Use arrows to navigate, Tab to drill in.",
         category=TipCategory.CLI,
-        command="quickstart",
+        shortcut="Tab",
         priority=92,
     ),
     StartupTip(
@@ -195,37 +194,19 @@ STARTUP_TIPS: List[StartupTip] = [
         priority=45,
     ),
 
-    # Video
-    StartupTip(
-        title="Video Mode",
-        content="Enable ASCII video visualization of your waveform data.",
-        category=TipCategory.VIDEO,
-        command="video on",
-        requires_feature="video",
-        priority=40,
-    ),
-    StartupTip(
-        title="Video Palettes",
-        content="Switch between different ASCII art rendering styles.",
-        category=TipCategory.VIDEO,
-        command="palette <name>",
-        requires_feature="video",
-        priority=35,
-    ),
-
     # Advanced
     StartupTip(
-        title="Kernel Parameters",
-        content="Adjust neural network kernel parameters (tau_a, tau_r) for different analysis characteristics.",
+        title="Parameter Mode",
+        content="Open parameter browser with \\ key. Navigate with arrows, Tab to drill in. Hold arrow keys for faster adjustment.",
         category=TipCategory.ADVANCED,
-        command="kernel",
+        shortcut="\\",
         priority=30,
     ),
     StartupTip(
         title="OSC Integration",
-        content="Connect to external applications via OSC for real-time parameter control.",
+        content="Listens on UDP port 1983 for OSC messages. Parameter mode values can be controlled remotely.",
         category=TipCategory.ADVANCED,
-        command="osc connect <host> <port>",
+        command="osc on",
         priority=25,
     ),
     StartupTip(

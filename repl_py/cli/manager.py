@@ -109,7 +109,9 @@ class CLIManager:
     """Manages CLI input/output state."""
 
     def __init__(self, history_size: int = 100, output_size: int = 100):
-        self.mode = False  # True when in CLI input mode
+        # Unified mode: always ready for input (no mode switching)
+        # 'mode' kept for backwards compatibility but defaults to True
+        self.mode = True  # Always in input mode now
         self.input_buffer = ""
         self.cursor_pos = 0
 
@@ -119,6 +121,9 @@ class CLIManager:
 
         self.output = deque(maxlen=output_size)
 
+        # Transient status (single line, replaces instead of accumulates)
+        self.transient_status: str = ""
+
         # Event/log tracking with timestamps
         self.last_event_time: Optional[float] = None
         self.event_callback: Optional[Callable] = None  # Callback to record events
@@ -126,6 +131,13 @@ class CLIManager:
 
         # Completion state (encapsulated for testability)
         self._completion = CompletionState()
+
+        # Double-space detection for play toggle
+        self.last_space_time: float = 0.0
+        self.double_space_threshold_ms: float = 300.0  # Max time between spaces
+
+        # Explicit tab completion (don't auto-update on keystrokes)
+        self.explicit_completion_mode: bool = True
 
     # ========== COMPLETION PROPERTY ACCESSORS (for backwards compat) ==========
 
@@ -150,18 +162,60 @@ class CLIManager:
         return self._completion.current_category
 
     def enter_mode(self):
-        """Enter CLI input mode."""
-        self.mode = True
+        """
+        Enter CLI input mode (legacy - now always in input mode).
+
+        Kept for backwards compatibility. Clears buffer for fresh input.
+        """
+        self.mode = True  # Always true now
         self.input_buffer = ""
         self.cursor_pos = 0
         self.history_index = -1
+        self._completion.hide()
 
     def exit_mode(self):
-        """Exit CLI input mode."""
-        self.mode = False
+        """
+        Exit CLI input mode (legacy - now just clears buffer).
+
+        In unified mode, this just clears the buffer rather than
+        switching modes. ESC clears input, double-ESC would be needed
+        for any "exit" behavior if desired.
+        """
+        # Don't change mode - always stay ready for input
+        # Just clear the buffer
         self.input_buffer = ""
         self.cursor_pos = 0
         self.history_index = -1
+        self._completion.hide()
+
+    def is_buffer_empty(self) -> bool:
+        """Check if input buffer is empty (for shortcut routing)."""
+        return len(self.input_buffer.strip()) == 0
+
+    def handle_space(self) -> str:
+        """
+        Handle space key with double-space detection.
+
+        Returns:
+            "double" if double-space detected (trigger play)
+            "single" if normal space (insert character)
+        """
+        now = time.time()
+        elapsed_ms = (now - self.last_space_time) * 1000
+
+        # Check for double-space
+        if elapsed_ms < self.double_space_threshold_ms and self.input_buffer.endswith(' '):
+            # Double-space detected - remove the first space and signal play
+            if self.input_buffer:
+                self.input_buffer = self.input_buffer[:-1]  # Remove trailing space
+                self.cursor_pos = max(0, self.cursor_pos - 1)
+            self.last_space_time = 0.0  # Reset to prevent triple-space
+            return "double"
+        else:
+            # Single space - insert normally
+            self.last_space_time = now
+            self.insert_char(' ')
+            return "single"
 
     def insert_char(self, ch: str):
         """Insert character at cursor position."""
@@ -288,6 +342,22 @@ class CLIManager:
     def clear_output(self):
         """Clear output buffer."""
         self.output.clear()
+
+    def set_transient(self, text: str):
+        """
+        Set transient status message (replaces previous, doesn't accumulate).
+
+        Use for temporary feedback like lane toggle messages that shouldn't
+        grow the CLI output area and steal viewport space from data lanes.
+
+        Args:
+            text: Status message (empty string clears it)
+        """
+        self.transient_status = text
+
+    def clear_transient(self):
+        """Clear transient status."""
+        self.transient_status = ""
 
     def get_output_lines(self, count: int = 3) -> list:
         """Get last N output lines."""

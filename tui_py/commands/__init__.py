@@ -18,6 +18,7 @@ from tui_py.commands.lane_editor_commands import register_lane_editor_commands
 from tui_py.commands.semantic_name_mapping_commands import register_semantic_name_mapping_commands
 from tui_py.commands.video_commands import register_video_commands as register_video_display_commands
 from tui_py.commands.recording_commands import register_recording_commands
+from tui_py.commands.osc_commands import register_osc_commands
 
 
 def register_all_commands(app_state):
@@ -43,6 +44,7 @@ def register_all_commands(app_state):
     register_semantic_name_mapping_commands(app_state)
     register_video_display_commands(app_state)
     register_recording_commands(app_state)
+    register_osc_commands(app_state)
 
 
 __all__ = ['register_all_commands']

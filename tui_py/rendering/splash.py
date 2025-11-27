@@ -11,94 +11,16 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Callable
 from tui_py.rendering.helpers import safe_addstr, safe_addstr_smart, smart_text
 from tui_py.rendering.startup import StartupState, StartupTip, STARTUP_TIPS
+from tui_py.rendering.transition import StartupTransitionState
+from tui_py.rendering.scene_buffer import opacity_to_attr
+from tui_py.rendering.logo import (
+    Logo, LogoVariant, MorphDirection, LogoDesignTokens,
+    LOGO_SMALL, LOGO_MEDIUM, T_MORPH_FRAMES, AU_STATIC
+)
 
-
-# ASCII art logo options
-LOGO_SMALL = [
-    "  ╦╔═╗╦ ╦  ",
-    "  ║╠═╣║ ║  ",
-    "  ╩╩ ╩╚═╝  ",
-]
-
-LOGO_MEDIUM = [
-    "  ████████╗ █████╗ ██╗   ██╗  ",
-    "  ╚══██╔══╝██╔══██╗██║   ██║  ",
-    "     ██║   ███████║██║   ██║  ",
-    "     ██║   ██╔══██║██║   ██║  ",
-    "     ██║   ██║  ██║╚██████╔╝  ",
-    "     ╚═╝   ╚═╝  ╚═╝ ╚═════╝   ",
-]
-
-# T to Tau (τ) morphing frames for animation
-# Frame 0: full T (default)
-# Frame N: tau symbol (τ shape like 7)
-# Tab key triggers morph as easter egg
-TAU_MORPH_FRAMES = [
-    # Frame 0: full T (matches LOGO_MEDIUM T)
-    [
-        "  ████████╗ ",
-        "  ╚══██╔══╝ ",
-        "     ██║    ",
-        "     ██║    ",
-        "     ██║    ",
-        "     ╚═╝    ",
-    ],
-    # Frame 1: T loosening
-    [
-        "  ████████╗ ",
-        "     ██╔══╝ ",
-        "     ██║    ",
-        "     ██║    ",
-        "     ██║    ",
-        "     ╚═╝    ",
-    ],
-    # Frame 2: stem starting to angle
-    [
-        "  ████████╗ ",
-        "     ██╔╝   ",
-        "     ██║    ",
-        "     ██║    ",
-        "    ██╔╝    ",
-        "    ╚═╝     ",
-    ],
-    # Frame 3: more angled
-    [
-        "  ████████╗ ",
-        "      ██╔╝  ",
-        "     ██╔╝   ",
-        "     ██║    ",
-        "    ██╔╝    ",
-        "    ╚═╝     ",
-    ],
-    # Frame 4: tau shape
-    [
-        "  ████████╗ ",
-        "      ██╔╝  ",
-        "     ██╔╝   ",
-        "    ██╔╝    ",
-        "   ██╔╝     ",
-        "   ╚═╝      ",
-    ],
-    # Frame 5: tau (τ) - stem reaches closer toward A
-    [
-        "  ████████╗ ",
-        "       ██╔╝ ",
-        "      ██╔╝  ",
-        "     ██╔╝   ",
-        "    ██╔╝    ",
-        "   ╚═╝      ",
-    ],
-]
-
-# A and U remain static during morph
-LOGO_AU = [
-    " █████╗ ██╗   ██╗  ",
-    "██╔══██╗██║   ██║  ",
-    "███████║██║   ██║  ",
-    "██╔══██║██║   ██║  ",
-    "██║  ██║╚██████╔╝  ",
-    "╚═╝  ╚═╝ ╚═════╝   ",
-]
+# Re-export for backwards compatibility
+TAU_MORPH_FRAMES = T_MORPH_FRAMES
+LOGO_AU = AU_STATIC
 
 
 @dataclass
@@ -201,6 +123,7 @@ class SplashAnimationState:
 
 TAGLINE = "Terminal Audio Workstation"
 SUBTITLE = "Neural Network Kernel Tuning"
+VERSION = "v0.0.1"
 
 QUICK_TIPS = [
     "Press ':' to enter CLI mode",
@@ -326,6 +249,41 @@ class SplashState:
     # Random tip on splash (pick one at init)
     random_tip_index: int = -1    # -1 means not initialized
 
+    # Page transition system
+    transition_state: Optional[StartupTransitionState] = None
+
+    # Logo class instance (optional, for advanced rendering)
+    logo: Optional[Logo] = None
+
+    def init_transition_state(self):
+        """Initialize the transition state machine for startup sequence."""
+        self.transition_state = StartupTransitionState()
+
+    def init_logo(self, bpm: float = None) -> Logo:
+        """
+        Initialize and return the Logo class instance.
+
+        This enables advanced logo features like BPM sync, fine-grained
+        fade control, and compositable rendering.
+
+        Args:
+            bpm: Optional BPM for synchronized effects
+
+        Returns:
+            The Logo instance (also stored in self.logo)
+        """
+        self.logo = Logo()
+        if bpm is not None:
+            self.logo.set_bpm(bpm)
+            self.logo.enable_bpm_sync(True)
+        return self.logo
+
+    def get_logo(self) -> Logo:
+        """Get or create the Logo instance."""
+        if self.logo is None:
+            self.init_logo()
+        return self.logo
+
     def should_dismiss(self) -> bool:
         """Check if splash should auto-dismiss."""
         if not self.auto_dismiss or not self.ready:
@@ -387,6 +345,9 @@ class SplashState:
         # Update animated progress
         self.anim_state.update_progress(self.anim_config)
         self.anim_state.tick()
+        # Update Logo class if initialized
+        if self.logo is not None:
+            self.logo.update()
         # If ready was queued and all steps are visible, trigger actual ready
         if self.ready_queued and self.step_queue.all_visible() and not self.ready:
             self.ready = True
@@ -398,6 +359,11 @@ class SplashState:
 
     def get_logo_frame(self) -> List[str]:
         """Get current logo frame (morphing T or static)."""
+        # Use Logo class if initialized
+        if self.logo is not None:
+            return self.logo.get_frame()
+
+        # Fallback to legacy behavior
         if self.anim_config.morph_enabled:
             frame_idx = self.anim_state.get_morph_frame(self.anim_config)
             t_frame = TAU_MORPH_FRAMES[frame_idx]
@@ -410,7 +376,11 @@ class SplashState:
 
     def trigger_tau_morph(self):
         """Trigger the T -> tau -> T easter egg animation (Tab key)."""
-        self.anim_state.trigger_morph()
+        # Use Logo class if initialized
+        if self.logo is not None:
+            self.logo.trigger_morph()
+        else:
+            self.anim_state.trigger_morph()
 
     def steps_completed(self) -> List[str]:
         """Get completed steps for display."""
@@ -567,6 +537,13 @@ class SplashRenderer:
             x = (screen_w - len(SUBTITLE)) // 2
             safe_addstr(scr, y, max(0, x), SUBTITLE,
                        curses.color_pair(COLOR_SUBTITLE) | curses.A_DIM)
+        y += 1
+
+        # Draw version (fades early)
+        if fade < 0.4:
+            x = (screen_w - len(VERSION)) // 2
+            safe_addstr(scr, y, max(0, x), VERSION,
+                       curses.color_pair(COLOR_SUBTITLE) | curses.A_DIM)
         y += 2
 
         # Draw loading bar (fades early)
@@ -676,8 +653,19 @@ class SplashRenderer:
                 attr = curses.A_DIM | curses.color_pair(color)
             safe_addstr(scr, y, x + i, char, attr)
 
-    def render_tips_page(self, scr, screen_h: int, screen_w: int):
-        """Render dedicated tips/tutorial page after loading."""
+    def render_tips_page(self, scr, screen_h: int, screen_w: int, opacity: float = 1.0):
+        """
+        Render dedicated tips/tutorial page after loading.
+
+        Args:
+            scr: curses screen
+            screen_h, screen_w: screen dimensions
+            opacity: 0.0 (invisible) to 1.0 (fully visible), default 1.0
+        """
+        if opacity < 0.1:
+            scr.erase()
+            return
+
         if not self.splash.startup:
             return
 
@@ -693,35 +681,33 @@ class SplashRenderer:
         # Header
         header = "Did You Know?"
         x = (screen_w - len(header)) // 2
-        safe_addstr(scr, y, max(0, x), header,
-                   curses.color_pair(COLOR_TAGLINE) | curses.A_BOLD)
+        header_attr = opacity_to_attr(opacity, curses.color_pair(COLOR_TAGLINE))
+        safe_addstr(scr, y, max(0, x), header, header_attr)
         y += 2
 
-        # Draw single-line box around tip (dimmed)
+        # Draw single-line box around tip
         box_width = min(60, screen_w - 4)
         box_x = (screen_w - box_width) // 2
-        box_attr = curses.color_pair(COLOR_SUBTITLE) | curses.A_DIM
+        box_attr = opacity_to_attr(opacity * 0.7, curses.color_pair(COLOR_SUBTITLE))
 
-        # Top border (single line)
+        # Top border
         safe_addstr(scr, y, box_x, "┌" + "─" * (box_width - 2) + "┐", box_attr)
         y += 1
 
         # Tip title
-        title_line = f"│ {tip.title}"
-        title_line = title_line + " " * (box_width - len(title_line) - 1) + "│"
+        title_attr = opacity_to_attr(opacity, curses.color_pair(COLOR_LOGO))
         safe_addstr(scr, y, box_x, "│", box_attr)
-        safe_addstr(scr, y, box_x + 2, tip.title,
-                   curses.color_pair(COLOR_LOGO) | curses.A_BOLD)
+        safe_addstr(scr, y, box_x + 2, tip.title, title_attr)
         safe_addstr(scr, y, box_x + box_width - 1, "│", box_attr)
         y += 1
 
-        # Separator (single line)
+        # Separator
         safe_addstr(scr, y, box_x, "├" + "─" * (box_width - 2) + "┤", box_attr)
         y += 1
 
         # Tip content (wrap if needed)
         content = tip.content
-        content_width = box_width - 4  # 2 chars padding each side
+        content_width = box_width - 4
         words = content.split()
         lines = []
         current_line = ""
@@ -735,9 +721,10 @@ class SplashRenderer:
         if current_line:
             lines.append(current_line)
 
-        for line in lines[:3]:  # Max 3 lines of content
+        content_attr = opacity_to_attr(opacity * 0.9, curses.color_pair(7))
+        for line in lines[:3]:
             safe_addstr(scr, y, box_x, "│", box_attr)
-            safe_addstr(scr, y, box_x + 2, line, curses.color_pair(7))
+            safe_addstr(scr, y, box_x + 2, line, content_attr)
             safe_addstr(scr, y, box_x + box_width - 1, "│", box_attr)
             y += 1
 
@@ -756,30 +743,104 @@ class SplashRenderer:
             shortcut_text = ""
         safe_addstr(scr, y, box_x, "│", box_attr)
         if shortcut_text:
-            safe_addstr(scr, y, box_x + 2, shortcut_text,
-                       curses.color_pair(COLOR_TIP))
+            shortcut_attr = opacity_to_attr(opacity * 0.9, curses.color_pair(COLOR_TIP))
+            safe_addstr(scr, y, box_x + 2, shortcut_text, shortcut_attr)
         safe_addstr(scr, y, box_x + box_width - 1, "│", box_attr)
         y += 1
 
-        # Bottom border (single line)
+        # Bottom border
         safe_addstr(scr, y, box_x, "└" + "─" * (box_width - 2) + "┘", box_attr)
         y += 2
 
-        # Progress indicator with arrow navigation
-        current_idx = self.splash.startup.current_tip_index + 1
-        total_tips = len(STARTUP_TIPS)
-        progress = f"◀  Tip {current_idx} of {total_tips}  ▶"
-        x = (screen_w - len(progress)) // 2
-        safe_addstr(scr, y, max(0, x), progress, curses.color_pair(COLOR_SUBTITLE))
-        y += 2
+        # Progress indicator (hide at low opacity)
+        if opacity > 0.4:
+            current_idx = self.splash.startup.current_tip_index + 1
+            total_tips = len(STARTUP_TIPS)
+            progress = f"◀  Tip {current_idx} of {total_tips}  ▶"
+            x = (screen_w - len(progress)) // 2
+            progress_attr = opacity_to_attr(opacity * 0.8, curses.color_pair(COLOR_SUBTITLE))
+            safe_addstr(scr, y, max(0, x), progress, progress_attr)
+            y += 2
 
-        # Navigation hint - static text
-        hint = "Enter to continue  ←/→ browse tips"
-        x = (screen_w - len(hint)) // 2
-        safe_addstr(scr, y, max(0, x), hint, curses.color_pair(COLOR_TAGLINE))
+            # Navigation hint
+            hint = "Enter to continue  ←/→ browse tips"
+            x = (screen_w - len(hint)) // 2
+            hint_attr = opacity_to_attr(opacity * 0.9, curses.color_pair(COLOR_TAGLINE))
+            safe_addstr(scr, y, max(0, x), hint, hint_attr)
 
         scr.refresh()
 
+
+    def render_logo_only(self, scr, screen_h: int, screen_w: int, opacity: float = 1.0):
+        """
+        Render just the tau logo centered on screen.
+
+        Used during transition from tips to main layout.
+
+        Args:
+            scr: curses screen
+            screen_h, screen_w: screen dimensions
+            opacity: 0.0 (invisible) to 1.0 (fully visible)
+        """
+        if opacity < 0.1:
+            scr.erase()
+            return
+
+        scr.erase()
+
+        # Use Logo class if initialized (enables BPM sync, shimmer, etc.)
+        if self.splash.logo is not None:
+            self.splash.logo.render(scr,
+                                   opacity=opacity,
+                                   screen_h=screen_h,
+                                   screen_w=screen_w,
+                                   center=True,
+                                   show_text=True)
+            scr.refresh()
+            return
+
+        # Fallback to legacy rendering
+        # Select logo based on screen size
+        if screen_w >= 35 and screen_h >= 15:
+            logo = self.splash.get_logo_frame()
+        else:
+            logo = LOGO_SMALL
+
+        # Calculate centering
+        logo_height = len(logo)
+        logo_width = max(len(line) for line in logo) if logo else 0
+
+        start_y = (screen_h - logo_height) // 2
+        start_x = (screen_w - logo_width) // 2
+
+        # Draw logo with opacity-based attributes
+        logo_attr = opacity_to_attr(opacity, curses.color_pair(COLOR_LOGO))
+        for i, line in enumerate(logo):
+            y = start_y + i
+            x = start_x
+            if 0 <= y < screen_h:
+                safe_addstr(scr, y, max(0, x), line[:screen_w], logo_attr)
+
+        # Draw tagline below logo (hide at low opacity)
+        if opacity > 0.3:
+            tagline_y = start_y + logo_height + 1
+            tagline_x = (screen_w - len(TAGLINE)) // 2
+            tagline_attr = opacity_to_attr(opacity * 0.9, curses.color_pair(COLOR_TAGLINE))
+            safe_addstr(scr, tagline_y, max(0, tagline_x), TAGLINE, tagline_attr)
+
+            # Draw subtitle
+            subtitle_y = tagline_y + 1
+            subtitle_x = (screen_w - len(SUBTITLE)) // 2
+            subtitle_attr = opacity_to_attr(opacity * 0.8, curses.color_pair(COLOR_SUBTITLE))
+            safe_addstr(scr, subtitle_y, max(0, subtitle_x), SUBTITLE, subtitle_attr)
+
+            # Draw version
+            version_y = subtitle_y + 1
+            version_x = (screen_w - len(VERSION)) // 2
+            version_attr = opacity_to_attr(opacity * 0.7, curses.color_pair(COLOR_SUBTITLE))
+            safe_addstr(scr, version_y, max(0, version_x), VERSION, version_attr)
+
+        scr.refresh()
 
 def render_splash(scr, splash_state: SplashState, screen_h: int, screen_w: int):
     """Convenience function to render splash screen."""

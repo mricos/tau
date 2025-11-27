@@ -29,8 +29,8 @@ class OSCClient:
     OSC client for sending/receiving control messages.
     """
 
-    def __init__(self, send_host: str = "127.0.0.1", send_port: int = 7400,
-                 recv_port: int = 7401):
+    def __init__(self, send_host: str = "127.0.0.1", send_port: int = 1983,
+                 recv_port: int = 1983):
         """
         Initialize OSC client.
 
@@ -145,8 +145,8 @@ class OSCMapper:
         self.state = app_state
         self.client = None
 
-    def enable(self, send_host: str = "127.0.0.1", send_port: int = 7400,
-               recv_port: int = 7401):
+    def enable(self, send_host: str = "127.0.0.1", send_port: int = 1983,
+               recv_port: int = 1983):
         """
         Enable OSC client with specified configuration.
 
@@ -228,8 +228,8 @@ def create_osc_spec_document(command_tree, output_path: str):
     lines.append("")
     lines.append("## Connection")
     lines.append("")
-    lines.append("- **Send to:** 127.0.0.1:7401 (application)")
-    lines.append("- **Receive from:** 127.0.0.1:7400 (application sends state)")
+    lines.append("- **Send to:** 127.0.0.1:1983 (application)")
+    lines.append("- **Receive from:** 127.0.0.1:1983 (application sends state)")
     lines.append("")
     lines.append("## OSC Type Tags")
     lines.append("")

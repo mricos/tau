@@ -292,7 +292,7 @@ def _data_command(app_state, action: str) -> str:
 
 
 def _ls_command(app_state, path: str = ".") -> str:
-    """List files in directory."""
+    """List files in directory (most recent first)."""
     from pathlib import Path
 
     project = app_state.project
@@ -308,8 +308,10 @@ def _ls_command(app_state, path: str = ".") -> str:
         # Single file info
         return f"{target.name} ({target.stat().st_size} bytes)"
 
-    # List directory
-    entries = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+    # List directory - most recent first, directories at top
+    entries = list(target.iterdir())
+    # Sort: directories first, then by modification time (newest first)
+    entries = sorted(entries, key=lambda p: (not p.is_dir(), -p.stat().st_mtime))
 
     lines = [f"{target}:"]
     for entry in entries[:20]:
