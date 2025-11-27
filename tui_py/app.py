@@ -14,6 +14,7 @@ import signal
 
 from tau_lib.core.state import AppState
 from tau_lib.core.config import load_config, save_config, get_default_config_path
+from tau_lib.core.aliases import get_alias_manager
 from tau_lib.data.data_loader import load_data_file, compute_duration
 from repl_py.cli.manager import CLIManager
 from tau_lib.core.commands_api import COMMAND_REGISTRY
@@ -25,8 +26,11 @@ from tui_py.rendering.pinned import render_pinned_compact, render_pinned_expande
 from tui_py.rendering.header import render_header
 from tui_py.rendering.cli import CLIRenderer
 from tui_py.rendering.splash import SplashState, SplashRenderer
+from tui_py.rendering.transition import StartupTransitionState
+from tui_py.rendering.scene_buffer import SceneCompositor
 from tui_py.rendering.sidebar import SidebarState, SidebarRenderer, create_default_panels
 from tui_py.rendering.modal import ModalState, ModalRenderer
+from tui_py.rendering.param_mode import ParamModeManager, ParamModeRenderer
 from tui_py.layout import compute_layout, get_special_lanes_info, get_max_special_lanes_height
 from tui_py.input_handler import InputHandler
 from tau_lib.core.project import TauProject
@@ -71,6 +75,7 @@ class App:
         self.splash = SplashState(visible=True)
         self.sidebar = SidebarState(visible=False)
         self.modal = ModalState(visible=False)
+        self.param_mode = ParamModeManager()  # Parameter mode (\ key)
 
         # Track initialization state
         self._initialized = False
@@ -133,6 +138,13 @@ class App:
             self.state.project = self.project
             self.state.cli = self.cli
 
+            # Wire up OSC state with param_mode for CC learn slider updates
+            # and start OSC listener by default
+            from tui_py.commands.osc_commands import get_osc_state
+            osc = get_osc_state()
+            osc.set_param_mode(self.param_mode)
+            osc.start()  # Auto-start OSC listener
+
             # Set up rich completion provider
             from tui_py.ui.completion import get_completions_rich
             self.cli.set_completion_rich_provider(get_completions_rich)
@@ -146,6 +158,7 @@ class App:
                 show_help=self._show_help,
                 sidebar=self.sidebar,
                 modal=self.modal,
+                param_mode=self.param_mode,
             )
 
             # Step 7: Load config
@@ -197,8 +210,7 @@ class App:
 
             # Add welcome message
             info = self.project.get_info()
-            self.cli.add_output("tau - Terminal Audio Workstation - Type 'quickstart' for tutorial, 'help' for commands")
-            self.cli.add_output(f"Session: {info['current_session']} | Lane 0=logs, Lane 9=events", is_log=True, log_level="INFO")
+            self.cli.add_output(f"Session: {info['current_session']} | lanes: 1-8 user, 9 events, 0 logs")
 
             # Done - queue ready state
             self.splash.set_ready()
@@ -281,36 +293,104 @@ class App:
         except Exception as e:
             raise
 
-    def _render_fade_in_interface(self, scr, h: int, w: int, fade_progress: float):
-        """Render main interface elements fading in during transition."""
-        # Only show elements based on fade progress (0.3 to 1.0 maps to 0.0 to 1.0)
-        normalized = (fade_progress - 0.3) / 0.7
+    def _show_tips_screen(self, stdscr, splash_renderer):
+        """
+        Show tips screen (called from 'tips' command).
+        Behaves identically to startup tips with transition back to main.
+        """
+        # Reset splash state for tips display
+        self.splash.init_startup_tips(
+            show_tips=True,
+            tips_count=999,  # Allow browsing all tips
+            require_enter=True
+        )
+        if self.splash.startup:
+            self.splash.startup.set_feature('video', self.state.features.video_enabled)
+            # Reset tip index to start
+            self.splash.startup.current_tip_index = 0
+            self.splash.startup.tips_acknowledged = 0
 
-        # Apply dim attribute for early fade stages
-        attr = curses.A_DIM if normalized < 0.7 else 0
+        self.splash.enter_tips_page()
+        stdscr.timeout(100)
 
-        # Header bar fades in first
-        if normalized > 0.2:
-            header_text = " tau - Terminal Audio Workstation "
-            header_attr = curses.color_pair(4) | attr
-            x = (w - len(header_text)) // 2
-            safe_addstr(scr, 0, max(0, x), header_text, header_attr)
+        # Tips browsing loop
+        while self.splash.should_show_tips():
+            self.splash.tick_only_animation()
+            h, w = stdscr.getmaxyx()
+            splash_renderer.render_tips_page(stdscr, h, w)
+            key = stdscr.getch()
 
-        # Status line at bottom fades in mid
-        if normalized > 0.4:
-            status = " Ready | Press ':' for CLI | '?' for help "
-            status_attr = curses.color_pair(7) | attr
-            x = (w - len(status)) // 2
-            safe_addstr(scr, h - 1, max(0, x), status, status_attr)
+            # Enter exits tips and starts transition
+            if key == 10 or key == 13 or key == curses.KEY_ENTER:
+                break
+            # Escape skips
+            elif key == 27:
+                break
+            # Arrow keys navigate tips
+            elif key == curses.KEY_RIGHT or key == curses.KEY_DOWN:
+                self.splash.next_tip()
+            elif key == curses.KEY_LEFT or key == curses.KEY_UP:
+                self.splash.prev_tip()
 
-        # Waveform area outline fades in later
-        if normalized > 0.6:
-            # Draw a simple border hint
-            border_char = "─"
-            border_attr = curses.color_pair(7) | curses.A_DIM
-            border_y = h // 3
-            border_line = border_char * (w - 4)
-            safe_addstr(scr, border_y, 2, border_line, border_attr)
+        # Run transition: tips fade out, logo appears, logo fades, back to main
+        self.splash.init_transition_state()
+        transition = self.splash.transition_state
+
+        h, w = stdscr.getmaxyx()
+        from tui_py.rendering.scene_buffer import SceneCompositor
+        compositor = SceneCompositor(h, w)
+
+        compositor.set_layer_render('tips',
+            lambda scr, hh, ww, op: splash_renderer.render_tips_page(scr, hh, ww, op)
+        )
+        compositor.set_layer_render('logo',
+            lambda scr, hh, ww, op: splash_renderer.render_logo_only(scr, hh, ww, op)
+        )
+        compositor.set_layer_render('main',
+            lambda scr, hh, ww, op: self._render_main_layout_preview(scr, hh, ww, op)
+        )
+
+        transition.trigger_tips_exit()
+        stdscr.timeout(16)
+
+        while not transition.is_main_ready():
+            new_h, new_w = stdscr.getmaxyx()
+            if new_h != h or new_w != w:
+                h, w = new_h, new_w
+                compositor.resize(h, w)
+
+            transition.update()
+
+            tips_opacity = transition.get_tips_opacity()
+            logo_opacity = transition.get_logo_opacity()
+            main_opacity = transition.get_main_opacity()
+
+            compositor.composite(stdscr, [
+                ('tips', tips_opacity),
+                ('logo', logo_opacity),
+                ('main', main_opacity),
+            ])
+
+            stdscr.refresh()
+            stdscr.getch()  # consume keys during transition
+
+        # Reset to normal display
+        self.splash.show_tips_page = False
+
+    def _render_main_layout_preview(self, scr, h: int, w: int, opacity: float):
+        """
+        Render placeholder during fade-in transition.
+
+        Currently renders nothing - just a blank screen behind the logo.
+        The main layout appears instantly when transition completes.
+
+        Args:
+            scr: curses screen
+            h, w: screen dimensions
+            opacity: 0.0 (invisible) to 1.0 (fully visible)
+        """
+        # Intentionally blank - logo overlays on empty screen
+        pass
 
     def run(self, stdscr):
         """Main curses loop."""
@@ -381,7 +461,7 @@ class App:
                 splash_renderer.render_tips_page(stdscr, h, w)
                 key = stdscr.getch()
 
-                # Enter immediately exits tips and starts app
+                # Enter immediately exits tips and starts transition
                 if key == 10 or key == 13 or key == curses.KEY_ENTER:
                     break
                 # Escape skips all tips
@@ -393,24 +473,56 @@ class App:
                 elif key == curses.KEY_LEFT or key == curses.KEY_UP:
                     self.splash.prev_tip()
 
-        # Fade out splash and fade in interface
-        self.splash.start_fade()
-        stdscr.timeout(16)  # ~60fps for smooth fade
-        while not self.splash.is_fade_complete():
-            self.splash.update_fade()
-            h, w = stdscr.getmaxyx()
+        # Initialize transition state machine
+        self.splash.init_transition_state()
+        transition = self.splash.transition_state
 
-            # Render splash (fading out)
-            splash_renderer.render(stdscr, h, w)
+        # Get screen dimensions and create scene compositor
+        h, w = stdscr.getmaxyx()
+        compositor = SceneCompositor(h, w)
 
-            # As splash fades, start showing interface elements with increasing opacity
-            fade_in = self.splash.fade_progress
-            if fade_in > 0.3:
-                # Start rendering main interface behind (it will show through as splash fades)
-                self._render_fade_in_interface(stdscr, h, w, fade_in)
+        # Set up render functions for each layer
+        # Each takes (scr, h, w, opacity) and renders with that opacity
+        compositor.set_layer_render('tips',
+            lambda scr, hh, ww, op: splash_renderer.render_tips_page(scr, hh, ww, op)
+        )
+        compositor.set_layer_render('logo',
+            lambda scr, hh, ww, op: splash_renderer.render_logo_only(scr, hh, ww, op)
+        )
+        compositor.set_layer_render('main',
+            lambda scr, hh, ww, op: self._render_main_layout_preview(scr, hh, ww, op)
+        )
+
+        # Start transition sequence
+        transition.trigger_tips_exit()
+
+        stdscr.timeout(16)  # ~60fps for smooth animation
+
+        # Run the transition sequence
+        while not transition.is_main_ready():
+            new_h, new_w = stdscr.getmaxyx()
+
+            # Handle terminal resize
+            if new_h != h or new_w != w:
+                h, w = new_h, new_w
+                compositor.resize(h, w)
+
+            transition.update()
+
+            # Get opacity for each layer
+            tips_opacity = transition.get_tips_opacity()
+            logo_opacity = transition.get_logo_opacity()
+            main_opacity = transition.get_main_opacity()
+
+            # Composite all layers - each renders with its own opacity
+            compositor.composite(stdscr, [
+                ('tips', tips_opacity),
+                ('logo', logo_opacity),
+                ('main', main_opacity),
+            ])
 
             stdscr.refresh()
-            stdscr.getch()  # consume any keys during fade
+            stdscr.getch()  # consume any keys during transition
 
         # Hide splash completely
         self.splash.hide()
@@ -440,6 +552,13 @@ class App:
         while True:
             perf.frame_start()
 
+            # Check if tips requested (from 'tips' command)
+            if self.state.features.show_tips_requested:
+                self.state.features.show_tips_requested = False
+                self._show_tips_screen(stdscr, splash_renderer)
+                need_full_redraw = True
+                continue
+
             # Check terminal size
             h, w = stdscr.getmaxyx()
             if w < lc.min_terminal_width or h < lc.min_terminal_height:
@@ -468,10 +587,17 @@ class App:
                 need_full_redraw = True  # Redraw on any input
 
             # Adjust timeout based on activity
-            if is_playing or self.cli.mode:
+            # Use fast polling when playing, typing, or OSC monitoring
+            osc_active = self.state.features.needs_redraw
+            if is_playing or self.cli.mode or osc_active:
                 stdscr.timeout(CLI_POLL_MS)  # Fast polling when active
             else:
                 stdscr.timeout(IDLE_POLL_MS)  # Slow polling when idle
+
+            # Check if background thread (OSC) requested redraw
+            if self.state.features.needs_redraw:
+                self.state.features.needs_redraw = False
+                need_full_redraw = True
 
             # Skip rendering if nothing changed (idle optimization)
             if not need_full_redraw and not cli_buffer_changed:
@@ -492,12 +618,12 @@ class App:
             perf.section_end()
             need_full_redraw = False
 
-            # === LAYOUT (CLI OUTPUT GROWS UPWARD) ===
+            # === LAYOUT (DATA LANES PRIORITY, CLI OUTPUT BELOW) ===
             # Layout from top to bottom:
             # 1. HEADER (2 rows)
-            # 2. DATA LANES (scrollable viewport - shrinks when CLI output grows)
-            # 3. CLI OUTPUT (grows upward, max lines configurable)
-            # 4. CLI PROMPT (1 row)
+            # 2. DATA LANES (gets priority - can push CLI output down)
+            # 3. CLI PROMPT (1 row)
+            # 4. CLI OUTPUT (below prompt, shrinks to min 1 line for data lanes)
             # 5. EVENTS LANE (if visible)
             # 6. LOGS LANE (if visible)
             # 7. CLI STATUS (1 row at bottom)
@@ -514,36 +640,41 @@ class App:
             if logs_lane and logs_lane.is_visible():
                 special_lanes_height += logs_lane.get_height()
 
-            # Calculate available space
+            # Calculate how much height data lanes want
+            data_lanes_desired = 0
+            for lane in self.state.lanes.get_data_lanes():
+                if lane.is_visible():
+                    data_lanes_desired += lane.get_height()
+
+            # Fixed elements: header + prompt + special lanes + status
             fixed_height = lc.header_height + lc.cli_prompt_height + special_lanes_height + lc.cli_status_height
             available_for_data_and_cli = h - fixed_height
 
-            # Calculate CLI output height - either completions or normal output
+            # Data lanes get priority - give them what they need (up to available - min cli)
+            cli_output_min = max(1, lc.cli_output_min_height)
+            max_for_data = available_for_data_and_cli - cli_output_min
+            data_viewport_h = min(data_lanes_desired, max_for_data)
+            data_viewport_h = max(lc.min_data_viewport, data_viewport_h)  # But at least min_data_viewport
+
+            # CLI output gets remaining space
+            cli_output_height = available_for_data_and_cli - data_viewport_h
+            cli_output_height = max(cli_output_min, cli_output_height)  # At least 1 line
+            cli_output_height = min(cli_output_height, lc.cli_output_max_height)  # Cap at max
+
+            # Handle completions popup (renders above prompt, steals from data lanes)
             if self.cli.completions_visible:
-                # Show completion popup instead of CLI output
-                # Height: header (1) + items + blank (1) + preview
                 num_items = min(len(self.cli.completion_items), lc.completion_max_items)
-                cli_output_height = 1 + num_items + 1 + lc.completion_preview_height
+                completion_height = 1 + num_items + 1 + lc.completion_preview_height
+                # Completions steal from data lanes, not cli output
+                data_viewport_h = max(lc.min_data_viewport, data_viewport_h - completion_height)
                 cli_output_lines = []
             else:
-                # Normal CLI output - dynamic sizing
+                # Get CLI output lines (most recent, up to height)
                 cli_output_lines = list(self.cli.output)
-                num_output_lines = len(cli_output_lines)
-
-                # Calculate max CLI height based on available space
-                max_cli_for_this_screen = max(lc.cli_output_min_height,
-                                              available_for_data_and_cli - lc.min_data_viewport)
-                desired_cli_height = min(num_output_lines, lc.cli_output_max_height)
-                cli_output_height = min(desired_cli_height, max_cli_for_this_screen)
-
-                # Truncate lines to what we'll actually display
                 if cli_output_height > 0:
                     cli_output_lines = cli_output_lines[-cli_output_height:]
                 else:
                     cli_output_lines = []
-
-            # Calculate data lanes viewport height (uses remaining space)
-            data_viewport_h = max(lc.min_data_viewport, available_for_data_and_cli - cli_output_height)
 
             # Render sections
             y_cursor = 0
@@ -560,75 +691,85 @@ class App:
             perf.section_end()
             y_cursor += data_viewport_h
 
-            # Calculate fixed positions from bottom up
+            # Calculate fixed positions from bottom
             status_line_y = h - 1
-            cli_prompt_y = status_line_y - special_lanes_height - lc.cli_prompt_offset
+            special_lanes_start_y = status_line_y - special_lanes_height
 
-            # 3. CLI OUTPUT or COMPLETIONS
+            # 3-4. CLI PROMPT and OUTPUT (order depends on float direction)
             perf.section_start('cli')
-            cli_output_y = lc.header_height + data_viewport_h
 
-            # Clear CLI output area to prevent ghosting (especially in CLI-only update mode)
-            if cli_buffer_changed:
-                # Clear from MINIMUM possible cli_output_y (when popup is at max height)
-                # to the bottom of the CLI area to handle moving position
-                min_cli_output_y = lc.header_height + lc.min_data_viewport
-                max_clear_height = available_for_data_and_cli - lc.min_data_viewport
-                for clear_y in range(min_cli_output_y, min(min_cli_output_y + max_clear_height, h)):
-                    stdscr.move(clear_y, 0)
-                    stdscr.clrtoeol()
-
-            if self.cli.completions_visible:
-                # Render completion popup ABOVE the prompt line
-                completion_height = self.cli_renderer.render_completions(stdscr, cli_prompt_y, w)
-                y_cursor = cli_prompt_y
+            # CLI area = prompt + output (output always below prompt)
+            # Float controls where the CLI area sits
+            if lc.cli_float == "up":
+                # Float up: CLI area hugs data lanes
+                # [data lanes] [prompt] [cli output] [empty] [special] [status]
+                cli_prompt_y = y_cursor
+                cli_output_y = y_cursor + 1
+                # cli_output_height already calculated, output grows down
             else:
-                # Render normal CLI output
-                self._render_cli_output(stdscr, cli_output_y, cli_output_height, w, cli_output_lines)
-                y_cursor = cli_output_y + cli_output_height
+                # Float down: CLI area hugs bottom (above special lanes)
+                # [data lanes] [empty] [prompt] [cli output] [special] [status]
+                # Calculate available space for CLI area (prompt + output)
+                available_for_cli_area = special_lanes_start_y - y_cursor
+                # Output can take up to max, but at least min
+                cli_output_height = min(available_for_cli_area - 1, lc.cli_output_max_height)  # -1 for prompt
+                cli_output_height = max(cli_output_min, cli_output_height)
+                # Position: prompt first, then output below, ending at special_lanes_start_y
+                cli_output_y = special_lanes_start_y - cli_output_height
+                cli_prompt_y = cli_output_y - 1
+                # Re-slice output lines for new height
+                if cli_output_height > 0:
+                    cli_output_lines = list(self.cli.output)[-cli_output_height:]
+                else:
+                    cli_output_lines = []
 
-            # Calculate the maximum possible special lanes area (when both visible)
-            max_special_lanes_height = 0
-            if events_lane:
-                max_special_lanes_height += events_lane.HEIGHT_SPECIAL
-            if logs_lane:
-                max_special_lanes_height += logs_lane.HEIGHT_SPECIAL
-
-            # Clear the entire special lanes area (to remove old content when toggled off)
-            # But don't clear the prompt line
-            if max_special_lanes_height > 0:
-                clear_start_y = status_line_y - max_special_lanes_height
-                for clear_y in range(clear_start_y, status_line_y):
-                    if clear_y > cli_prompt_y:  # Don't clear prompt or above
-                        stdscr.move(clear_y, 0)
-                        stdscr.clrtoeol()
-
-            # 4. CLI PROMPT (1 row) - render AFTER clearing to ensure it's visible
+            # Render prompt
             self.cli_renderer.render_prompt(stdscr, cli_prompt_y, w)
 
-            # 5. COMPLETION STATUS - one-liner BELOW prompt when completions visible
+            # Render CLI output or completions
             if self.cli.completions_visible:
-                self.cli_renderer.render_completion_preview(stdscr, cli_prompt_y + 1, w)
+                if lc.cli_completions == "above":
+                    # Render completion popup ABOVE the prompt line
+                    self.cli_renderer.render_completions(stdscr, cli_prompt_y, w)
+                    # Render completion preview below prompt
+                    self.cli_renderer.render_completion_preview(stdscr, cli_prompt_y + 1, w)
+                else:
+                    # Render completion popup BELOW the prompt (overlay to bottom)
+                    self.cli_renderer.render_completions_below(stdscr, cli_prompt_y + 1, h, w)
+            else:
+                # Render CLI output below prompt - newest at top (closest to prompt)
+                reversed_output = list(reversed(cli_output_lines))
+                self._render_cli_output(stdscr, cli_output_y, cli_output_height, w, reversed_output, False)
 
-            # Render visible special lanes
+            # 5. SPECIAL LANES (events, logs) - anchored above status line
             if special_lanes_height > 0:
-                special_lanes_start_y = status_line_y - special_lanes_height
-                if special_lanes_start_y >= y_cursor:
-                    y_special = special_lanes_start_y
-                    if events_lane and events_lane.is_visible():
-                        self._render_special_lane(stdscr, y_special, events_lane, w)
-                        y_special += events_lane.get_height()
+                y_special = special_lanes_start_y
+                if events_lane and events_lane.is_visible():
+                    self._render_special_lane(stdscr, y_special, events_lane, w)
+                    y_special += events_lane.get_height()
 
-                    if logs_lane and logs_lane.is_visible():
-                        self._render_special_lane(stdscr, y_special, logs_lane, w)
-                        y_special += logs_lane.get_height()
+                if logs_lane and logs_lane.is_visible():
+                    self._render_special_lane(stdscr, y_special, logs_lane, w)
 
             # 6. CLI STATUS LINE (1 row at bottom)
             self.cli_renderer.render_status(stdscr, status_line_y, w)
             perf.section_end()  # end 'cli' section
 
-            # 7. SIDEBAR (renders on right side of CLI output area)
-            if self.sidebar.visible:
+            # 7. SIDEBAR or PARAM MODE (renders on right side of CLI output area)
+            # Param mode takes precedence over sidebar when visible
+            if self.param_mode.is_visible():
+                pm_width = 28
+                pm_x = w - pm_width
+                # Position param mode 3 rows above CLI prompt
+                pm_y = max(lc.header_height, cli_prompt_y - 3)
+                # Extend to bottom of screen (above status line)
+                pm_h = status_line_y - pm_y
+                # Divider ends at bottom of CLI output area
+                cli_output_bottom = cli_output_y + cli_output_height
+                ParamModeRenderer(self.param_mode, self.state).render(
+                    stdscr, pm_x, pm_y, pm_width, pm_h, cli_output_bottom
+                )
+            elif self.sidebar.visible:
                 sidebar_x = w - self.sidebar.width
                 sidebar_y = lc.header_height + data_viewport_h
                 sidebar_h = cli_output_height
@@ -861,7 +1002,7 @@ class App:
             lane.content_colors
         )
 
-    def _render_cli_output(self, scr, y_start: int, height: int, width: int, output_lines: list):
+    def _render_cli_output(self, scr, y_start: int, height: int, width: int, output_lines: list, anchor_bottom: bool = False):
         """
         Render dynamic CLI output area - the ephemeral stage.
 
@@ -877,13 +1018,26 @@ class App:
             height: Number of lines to render
             width: Terminal width
             output_lines: Lines to display (already truncated to max height)
+            anchor_bottom: If True, anchor lines at bottom of area (for float-down mode)
         """
         if height == 0:
             return
 
-        # Render output lines
-        for i, line in enumerate(output_lines):
+        # Clear the full height first (prevents ghosting)
+        for i in range(height):
             y = y_start + i
+            scr.move(y, 0)
+            scr.clrtoeol()
+
+        # Calculate y offset based on anchoring
+        num_lines = len(output_lines)
+        if anchor_bottom and num_lines < height:
+            y_offset = height - num_lines  # Anchor at bottom
+        else:
+            y_offset = 0  # Anchor at top (float-up mode)
+
+        for i, line in enumerate(output_lines):
+            y = y_start + y_offset + i
 
             # Detect message types for highlighting
             is_success = line.startswith("✓") or "success" in line.lower()
@@ -978,6 +1132,9 @@ class App:
         Returns:
             Output message
         """
+        # Resolve user aliases first
+        cmd_str = get_alias_manager().resolve(cmd_str)
+
         # Parse command and arguments
         parts = cmd_str.strip().split()
         if not parts:
