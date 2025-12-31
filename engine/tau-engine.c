@@ -214,6 +214,10 @@ static inline float slot_tick(SampleSlot* s){
 // ---------- Synth Voice ----------
 typedef enum { W_SINE=0, W_PULSE=1 } WaveType;
 
+// Envelope modes and stages
+typedef enum { ENV_GATE=0, ENV_PERC=1, ENV_SUST=2 } EnvMode;
+typedef enum { ENV_OFF=0, ENV_ATTACK=1, ENV_SUSTAIN=2, ENV_RELEASE=3 } EnvStage;
+
 typedef struct {
     _Atomic int on;
     _Atomic int wave;
@@ -227,6 +231,15 @@ typedef struct {
     float phase;
     float sr;
     float Astate, Bstate;
+
+    // Amplitude envelope
+    struct {
+        _Atomic int mode;       // ENV_GATE, ENV_PERC, ENV_SUST
+        _Atomic int stage;      // ENV_OFF, ENV_ATTACK, ENV_SUSTAIN, ENV_RELEASE
+        _Atomic float tau_a;    // Attack time constant (seconds)
+        _Atomic float tau_d;    // Decay/release time constant (seconds)
+        float value;            // Current envelope value 0-1
+    } env;
 } Voice;
 
 static void voice_init(Voice* v, float sr){
@@ -240,10 +253,80 @@ static void voice_init(Voice* v, float sr){
     atomic_store(&v->tauA, 0.005f);
     atomic_store(&v->tauB, 0.020f);
     atomic_store(&v->dutyBias, 0.5f);
+
+    // Initialize envelope with PERC mode by default (click-free drums)
+    atomic_store(&v->env.mode, ENV_PERC);
+    atomic_store(&v->env.stage, ENV_OFF);
+    atomic_store(&v->env.tau_a, 0.005f);   // 5ms attack (snappy, no click)
+    atomic_store(&v->env.tau_d, 0.100f);   // 100ms decay
+    v->env.value = 0.0f;
+}
+
+// Process envelope, returns 0-1 amplitude multiplier
+static inline float envelope_tick(Voice* v) {
+    int mode = atomic_load(&v->env.mode);
+    int stage = atomic_load(&v->env.stage);
+    float tau_a = fmaxf(0.001f, atomic_load(&v->env.tau_a));
+    float tau_d = fmaxf(0.001f, atomic_load(&v->env.tau_d));
+
+    // GATE mode: instant on/off (legacy behavior)
+    if (mode == ENV_GATE) {
+        return atomic_load(&v->on) ? 1.0f : 0.0f;
+    }
+
+    float target, tau;
+    switch (stage) {
+        case ENV_OFF:
+            v->env.value = 0.0f;
+            return 0.0f;
+
+        case ENV_ATTACK:
+            target = 1.0f;
+            tau = tau_a;
+            // Exponential approach: value += (target - value) * (1 - e^(-1/(tau*sr)))
+            v->env.value += (target - v->env.value) * (1.0f - expf(-1.0f / (tau * v->sr)));
+            // Transition when close to target
+            if (v->env.value >= 0.999f) {
+                v->env.value = 1.0f;
+                if (mode == ENV_PERC) {
+                    // PERC: immediately start decay
+                    atomic_store(&v->env.stage, ENV_RELEASE);
+                } else {
+                    // SUST: hold until REL command
+                    atomic_store(&v->env.stage, ENV_SUSTAIN);
+                }
+            }
+            break;
+
+        case ENV_SUSTAIN:
+            // Hold at 1.0 (for SUST mode)
+            v->env.value = 1.0f;
+            break;
+
+        case ENV_RELEASE:
+            target = 0.0f;
+            tau = tau_d;
+            // Exponential decay
+            v->env.value *= expf(-1.0f / (tau * v->sr));
+            // Transition to OFF when quiet
+            if (v->env.value < 0.001f) {
+                v->env.value = 0.0f;
+                atomic_store(&v->env.stage, ENV_OFF);
+                atomic_store(&v->on, 0);  // Turn off voice when envelope done
+            }
+            break;
+    }
+
+    return v->env.value;
 }
 
 static inline float voice_tick(Voice* v){
-    if (!atomic_load(&v->on)) return 0.0f;
+    // Process envelope first - it controls amplitude and can keep voice active during release
+    float env_val = envelope_tick(v);
+
+    // If envelope is off and voice is off, no output
+    if (env_val < 0.0001f && !atomic_load(&v->on)) return 0.0f;
+
     int s = atomic_exchange(&v->spikes, 0);
     if (s>0){ v->Astate += (float)s; v->Bstate += (float)s; }
 
@@ -264,7 +347,9 @@ static inline float voice_tick(Voice* v){
     if (v->phase >= 1.0f) v->phase -= 1.0f;
 
     float y = (w==W_SINE) ? sinf(TWO_PI * v->phase) : ((v->phase < duty) ? 1.0f : -1.0f);
-    return y * g;
+
+    // Apply envelope to output (click-free amplitude control)
+    return y * g * env_val;
 }
 
 // ---------- Recorder ----------
@@ -768,6 +853,7 @@ static void process_command(const char* cmd, char* response, size_t resp_size,
 
         if (strcmp(tokens[2], "ON") == 0){
             atomic_store(&V->on, 1);
+            atomic_store(&V->env.stage, ENV_ATTACK);  // Auto-trigger envelope
             snprintf(response, resp_size, "OK VOICE %d ON\n", vi);
 
             char event[256];
@@ -846,6 +932,48 @@ static void process_command(const char* cmd, char* response, size_t resp_size,
             atomic_store(&V->tauA, ta);
             atomic_store(&V->tauB, tb);
             snprintf(response, resp_size, "OK VOICE %d TAU %.4f %.4f\n", vi, ta, tb);
+            return;
+        }
+
+        // ENV mode tau_a tau_d - Set envelope parameters
+        if (strcmp(tokens[2], "ENV") == 0){
+            if (ntok < 5){
+                snprintf(response, resp_size, "ERROR ENV <mode> <tau_a> <tau_d> (mode: GATE|PERC|SUST)\n");
+                return;
+            }
+            int mode = ENV_PERC;  // default
+            if (strcasecmp(tokens[3], "GATE") == 0) mode = ENV_GATE;
+            else if (strcasecmp(tokens[3], "PERC") == 0) mode = ENV_PERC;
+            else if (strcasecmp(tokens[3], "SUST") == 0) mode = ENV_SUST;
+            float tau_a = fmaxf(0.001f, atof(tokens[4]));
+            float tau_d = (ntok >= 6) ? fmaxf(0.001f, atof(tokens[5])) : 0.1f;
+            atomic_store(&V->env.mode, mode);
+            atomic_store(&V->env.tau_a, tau_a);
+            atomic_store(&V->env.tau_d, tau_d);
+            snprintf(response, resp_size, "OK VOICE %d ENV %s %.3f %.3f\n", vi, tokens[3], tau_a, tau_d);
+            return;
+        }
+
+        // TRIG - Trigger note (start attack)
+        if (strcmp(tokens[2], "TRIG") == 0){
+            atomic_store(&V->on, 1);
+            atomic_store(&V->env.stage, ENV_ATTACK);
+            snprintf(response, resp_size, "OK VOICE %d TRIG\n", vi);
+
+            char event[256];
+            snprintf(event, sizeof(event), "EVENT VOICE %d TRIG\n", vi);
+            srv_broadcast(event);
+            return;
+        }
+
+        // REL - Release note (start decay)
+        if (strcmp(tokens[2], "REL") == 0){
+            atomic_store(&V->env.stage, ENV_RELEASE);
+            snprintf(response, resp_size, "OK VOICE %d REL\n", vi);
+
+            char event[256];
+            snprintf(event, sizeof(event), "EVENT VOICE %d REL\n", vi);
+            srv_broadcast(event);
             return;
         }
 
