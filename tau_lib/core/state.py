@@ -167,16 +167,14 @@ class Transport:
     loaded_tracks: Dict[int, int] = field(default_factory=dict)  # {lane_id: track_id}
 
     def _ensure_tau(self):
-        """Lazily initialize tau connection."""
+        """Lazily initialize tau connection via canonical startup policy."""
         if self.tau is None:
             try:
-                from tau_lib.integration.tau_playback import TauMultitrack
-                tau_inst = TauMultitrack()
-                # Only set if connection works
-                if tau_inst.check_connection():
-                    self.tau = tau_inst
-            except Exception as e:
-                # Tau not available - that's ok, continue without audio
+                from tau_lib.integration.engine import connect_engine
+                result = connect_engine(auto_start=True)
+                if result.ok:
+                    self.tau = result.engine
+            except Exception:
                 pass
 
     def update(self, dt: float = None):

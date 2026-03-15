@@ -20,6 +20,11 @@ def main():
         sys.argv.pop(1)
         from tui_py.app import main as tui_main
         tui_main()
+    elif len(sys.argv) > 1 and sys.argv[1] == "player":
+        # Remove 'player' argument and launch player
+        sys.argv.pop(1)
+        from player_py.app import main as player_main
+        player_main()
     else:
         # Default: Launch REPL
         from repl_py.repl import main as repl_main
