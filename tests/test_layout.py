@@ -30,7 +30,7 @@ class TestLayoutConfig:
         assert lc.cli_status_height == 1
         assert lc.cli_prompt_offset == 4
         assert lc.cli_output_min_height == 0
-        assert lc.cli_output_max_height == 25
+        assert lc.cli_output_max_height == 8
         assert lc.completion_max_items == 8
         assert lc.completion_preview_height == 3
         assert lc.min_data_viewport == 4

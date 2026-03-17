@@ -2,4 +2,3 @@
 
 from player_py.backends.base import Backend
 from player_py.backends.tau import TauBackend
-from player_py.backends.ffplay import FfplayBackend

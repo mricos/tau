@@ -8,6 +8,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.egg-info/
 
 # REPL temporary files
 test_script.tau
@@ -17,11 +18,17 @@ test_script.tau
 .DS_Store
 
 # Compiled binaries
+engine/tau-engine
+engine/tau-send
 player_c/tau-player
 tau_lib/algorithms/filterbank/filterbank
 tau_lib/algorithms/phoneme/phoneme_analyze
 tau_lib/algorithms/phoneme/miniaudio.h
 tau_lib/algorithms/tscale/tscale
+
+# Build artifacts
+dist/
+build/
 
 # Output files
 *.png

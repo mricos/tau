@@ -97,7 +97,7 @@ def extract_metadata(path: Path) -> TrackMeta:
 
     # Duration fallback via ffprobe
     if meta.duration == 0.0:
-        meta.duration = _ffprobe_duration(path)
+        meta.duration = probe_duration(path)
 
     return meta
 
@@ -109,7 +109,16 @@ def _parse_int(s: str) -> int:
         return 0
 
 
-def _ffprobe_duration(path: Path) -> float:
+def probe_duration(path: Path) -> float:
+    """Get audio duration. Tries wave for .wav, then ffprobe, else 0.0."""
+    import wave
+    if path.suffix.lower() == '.wav':
+        try:
+            with wave.open(str(path), 'rb') as wf:
+                return wf.getnframes() / wf.getframerate()
+        except Exception:
+            pass
+
     import subprocess
     try:
         result = subprocess.run(

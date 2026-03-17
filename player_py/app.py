@@ -145,8 +145,6 @@ class PlayerApp:
                 self._render_mini(scr, h, w)
             elif self.show_analysis:
                 self._render_with_analysis(scr, h, w)
-            elif w >= 120:
-                self._render_standard(scr, h, w, wide=True)
             else:
                 self._render_standard(scr, h, w)
 
@@ -164,14 +162,10 @@ class PlayerApp:
 
     def _render_mini(self, scr, h: int, w: int):
         track = self.playlist.current()
-        name = track.name if track else "(no tracks)"
-        parent = track.parent_dir + '/' if track and track.parent_dir else ""
+        name = track.display_label if track else "(no tracks)"
 
         row = 0
         safe_addstr(scr, row, 0, truncate_middle(name, w), curses.A_BOLD)
-        row += 1
-        if parent:
-            safe_addstr(scr, row, 0, truncate_middle(parent, w), curses.A_DIM)
         row += 1
 
         pos_str = format_time(self.transport.position)
@@ -197,7 +191,7 @@ class PlayerApp:
 
         sort_label = f"Files [{self.playlist.sort.value}]"
         draw_box(scr, 0, 0, h, list_w, sort_label)
-        self._render_browser(scr, h, list_w, wide=False)
+        self._render_browser(scr, h, list_w)
 
         # Update cursor time from transport
         self.analysis.set_cursor(self.transport.position)
@@ -205,18 +199,18 @@ class PlayerApp:
 
     # ── Standard Mode (>= 40 cols, >= 10 rows) ──
 
-    def _render_standard(self, scr, h: int, w: int, wide: bool = False):
+    def _render_standard(self, scr, h: int, w: int):
         list_w = max(20, min(w - 20, int(w * self.split_ratio)))
         panel_w = w - list_w
 
         sort_label = f"Files [{self.playlist.sort.value}]"
         draw_box(scr, 0, 0, h, list_w, sort_label)
-        self._render_browser(scr, h, list_w, wide)
+        self._render_browser(scr, h, list_w)
 
         draw_box(scr, 0, list_w, h, panel_w, "Now Playing")
-        self._render_now_playing(scr, h, list_w, panel_w, wide)
+        self._render_now_playing(scr, h, list_w, panel_w)
 
-    def _render_browser(self, scr, h: int, list_w: int, wide: bool):
+    def _render_browser(self, scr, h: int, list_w: int):
         max_lines = h - 2
         tracks = self.playlist.tracks
 
@@ -233,10 +227,8 @@ class PlayerApp:
 
             t = tracks[idx]
             prefix = " * " if idx == self.playlist.current_index else "   "
-            # Show vox flags indicator if annotated
             flags = f" [{t.vox_flags}]" if t.vox_flags else ""
-            label = f"{t.parent_dir}/{t.display_label}" if wide and t.parent_dir else t.display_label
-            label += flags
+            label = t.display_label + flags
             line = prefix + truncate_middle(label, max(1, inner_w - len(prefix)))
 
             attr = curses.A_NORMAL
@@ -247,21 +239,24 @@ class PlayerApp:
 
             safe_addstr(scr, 1 + i, 1, line[:inner_w], attr)
 
-    def _render_now_playing(self, scr, h: int, x: int, panel_w: int, wide: bool):
+    def _render_now_playing(self, scr, h: int, x: int, panel_w: int):
         ix = x + 2
         iw = panel_w - 4
         track = self.playlist.current()
 
         row = 2
         if track:
-            safe_addstr(scr, row, ix, truncate_middle(track.name, iw), curses.A_BOLD)
+            safe_addstr(scr, row, ix, truncate_middle(track.display_label, iw), curses.A_BOLD)
             row += 1
-            if track.parent_dir:
-                safe_addstr(scr, row, ix, truncate_middle(track.parent_dir + '/', iw), curses.A_DIM)
+            # Metadata line: artist - album (if available)
+            meta_parts = []
+            if track.artist:
+                meta_parts.append(track.artist)
+            if track.album:
+                meta_parts.append(track.album)
+            if meta_parts:
+                safe_addstr(scr, row, ix, truncate_middle(" / ".join(meta_parts), iw), curses.A_DIM)
             row += 1
-            if wide:
-                safe_addstr(scr, row, ix, truncate_middle(str(track.path), iw), curses.A_DIM)
-                row += 1
         else:
             safe_addstr(scr, row, ix, "(no tracks)")
             row += 1

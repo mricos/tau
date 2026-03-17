@@ -1,10 +1,9 @@
-"""PlayerTransport: thin orchestrator over pluggable audio backends."""
+"""PlayerTransport: thin orchestrator over tau-engine backend."""
 
 import time
 from pathlib import Path
 
-from player_py.backends.tau import TauBackend, TAU_FORMATS
-from player_py.backends.ffplay import FfplayBackend, ffplay_available
+from player_py.backends.tau import TauBackend
 
 
 class PlayerTransport:
@@ -15,77 +14,55 @@ class PlayerTransport:
         self._last_time: float = 0.0
         self._loaded_path: Path | None = None
         self._volume: float = 0.8
-
-        self._tau: TauBackend | None = None
-        self._ffplay: FfplayBackend | None = None
-        self._active: TauBackend | FfplayBackend | None = None
+        self._backend: TauBackend | None = None
         self._error: str = ""
 
-        self._init_backends()
+        self._init_backend()
 
-    def _init_backends(self):
+    def _init_backend(self):
         try:
             from tau_lib.integration.engine import connect_engine
             result = connect_engine(auto_start=True)
             if result.ok:
-                self._tau = TauBackend(result.engine)
-        except Exception:
-            pass
-
-        if ffplay_available():
-            self._ffplay = FfplayBackend()
-
-        if not self._tau and not self._ffplay:
-            self._error = "No audio backend available"
-
-    def _pick_backend(self, path: Path) -> TauBackend | FfplayBackend | None:
-        ext = path.suffix.lower()
-        if ext in TAU_FORMATS and self._tau:
-            return self._tau
-        if self._ffplay:
-            return self._ffplay
-        if self._tau:
-            return self._tau
-        return None
+                self._backend = TauBackend(result.engine)
+                return
+            self._error = result.error
+        except Exception as e:
+            self._error = str(e)
 
     def load(self, path: Path) -> bool:
         self.stop()
         self._loaded_path = path
         self._position = 0.0
         self._duration = 0.0
-        self._active = self._pick_backend(path)
 
-        if self._active is None:
+        if self._backend is None:
             return False
 
-        # Probe duration via MediaFile (lazy, cached)
-        from player_py.scanner import probe_duration
+        from player_py.metadata import probe_duration
         self._duration = probe_duration(path)
 
-        ok = self._active.load(path)
-        if not ok and self._active is self._tau and self._ffplay:
-            self._active = self._ffplay
-            ok = self._active.load(path)
+        ok = self._backend.load(path)
         if not ok:
-            self._active = None
+            self._error = f"Failed to load: {path.name}"
         return ok
 
     def play(self) -> bool:
-        if self._active is None or self._loaded_path is None:
+        if self._backend is None or self._loaded_path is None:
             return False
         if self._playing:
             return True
         self._playing = True
         self._last_time = time.monotonic()
-        self._active.play()
+        self._backend.play()
         return True
 
     def pause(self):
         if not self._playing:
             return
         self._playing = False
-        if self._active:
-            self._active.pause()
+        if self._backend:
+            self._backend.pause()
 
     def toggle(self):
         if self._playing:
@@ -96,8 +73,8 @@ class PlayerTransport:
     def stop(self):
         self._playing = False
         self._position = 0.0
-        if self._active:
-            self._active.stop()
+        if self._backend:
+            self._backend.stop()
 
     def seek(self, pos: float):
         if self._duration > 0:
@@ -106,23 +83,23 @@ class PlayerTransport:
             pos = max(0.0, pos)
         self._position = pos
         self._last_time = time.monotonic()
-        if self._playing and self._active:
-            self._active.seek(pos)
+        if self._playing and self._backend:
+            self._backend.seek(pos)
 
     def seek_relative(self, delta: float):
         self.seek(self._position + delta)
 
     def set_volume(self, vol: float):
         self._volume = max(0.0, min(1.0, vol))
-        if self._active:
-            self._active.set_volume(self._volume)
+        if self._backend:
+            self._backend.set_volume(self._volume)
 
     def update(self) -> bool:
         """Advance wall-clock position. Returns True if track ended."""
         if not self._playing:
             return False
 
-        if self._active and self._active.poll_ended():
+        if self._backend and self._backend.poll_ended():
             self._playing = False
             if self._duration > 0:
                 self._position = self._duration
@@ -135,8 +112,8 @@ class PlayerTransport:
         if self._duration > 0 and self._position >= self._duration:
             self._playing = False
             self._position = self._duration
-            if self._active:
-                self._active.stop()
+            if self._backend:
+                self._backend.stop()
             return True
         return False
 
@@ -168,14 +145,12 @@ class PlayerTransport:
 
     @property
     def backend(self) -> str:
-        return self._active.name if self._active else "none"
+        return "tau" if self._backend else "none"
 
     @property
     def error(self) -> str:
         return self._error
 
     def cleanup(self):
-        if self._tau:
-            self._tau.cleanup()
-        if self._ffplay:
-            self._ffplay.cleanup()
+        if self._backend:
+            self._backend.cleanup()
