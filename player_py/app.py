@@ -4,14 +4,12 @@ import curses
 import sys
 from pathlib import Path
 
-from tui_py.rendering.helpers import (
-    safe_addstr, draw_progress_bar, draw_box, truncate_middle, format_time,
-    init_colors,
-)
+from tui_py.rendering.helpers import draw_box, init_colors
 from player_py.scanner import scan_directory
 from player_py.playlist import Playlist, SortMode
 from player_py.transport import PlayerTransport
 from player_py.analysis import AnalysisScreen
+from player_py import screens
 
 
 class PlayerApp:
@@ -101,9 +99,7 @@ class PlayerApp:
 
     def _action_export_training(self):
         if self.show_analysis and self.analysis.bundle:
-            out = self.analysis.handle_export(self.directory)
-            # Briefly flash exported path — visible next render cycle
-            self._export_msg = out if out else "No data to export"
+            self.analysis.handle_export(self.directory)
 
     def _action_filter_annotated(self):
         self.playlist.filter_annotated()
@@ -142,7 +138,7 @@ class PlayerApp:
             scr.erase()
 
             if w < 40 or h < 10:
-                self._render_mini(scr, h, w)
+                screens.render_mini(scr, h, w, self.playlist, self.transport)
             elif self.show_analysis:
                 self._render_with_analysis(scr, h, w)
             else:
@@ -158,46 +154,7 @@ class PlayerApp:
             if key != -1:
                 self._handle_key(key)
 
-    # ── Mini Mode (< 40 cols or < 10 rows) ──
-
-    def _render_mini(self, scr, h: int, w: int):
-        track = self.playlist.current()
-        name = track.display_label if track else "(no tracks)"
-
-        row = 0
-        safe_addstr(scr, row, 0, truncate_middle(name, w), curses.A_BOLD)
-        row += 1
-
-        pos_str = format_time(self.transport.position)
-        dur_str = format_time(self.transport.duration) if self.transport.duration > 0 else "?:??"
-        safe_addstr(scr, row, 0, f"{pos_str} / {dur_str}"[:w])
-        row += 1
-
-        if row < h:
-            draw_progress_bar(scr, row, 0, min(w, 40), self.transport.progress)
-            row += 1
-
-        if row < h:
-            play_ch = "||" if self.transport.playing else ">>"
-            rep = self.playlist.repeat.value
-            safe_addstr(scr, row, 0, f"|<  {play_ch}  >|  []  r:{rep}  [{self.transport.backend}]"[:w])
-
-    # ── Analysis Mode ──
-
-    def _render_with_analysis(self, scr, h: int, w: int):
-        # Left: file browser (narrow), Right: analysis (wide)
-        list_w = max(20, min(int(w * 0.25), 40))
-        panel_w = w - list_w
-
-        sort_label = f"Files [{self.playlist.sort.value}]"
-        draw_box(scr, 0, 0, h, list_w, sort_label)
-        self._render_browser(scr, h, list_w)
-
-        # Update cursor time from transport
-        self.analysis.set_cursor(self.transport.position)
-        self.analysis.render(scr, 0, list_w, h, panel_w)
-
-    # ── Standard Mode (>= 40 cols, >= 10 rows) ──
+    # ── Layout routing ──
 
     def _render_standard(self, scr, h: int, w: int):
         list_w = max(20, min(w - 20, int(w * self.split_ratio)))
@@ -205,90 +162,26 @@ class PlayerApp:
 
         sort_label = f"Files [{self.playlist.sort.value}]"
         draw_box(scr, 0, 0, h, list_w, sort_label)
-        self._render_browser(scr, h, list_w)
+        self.browser_scroll = screens.render_browser(
+            scr, h, list_w, self.playlist, self.browser_cursor, self.browser_scroll)
 
         draw_box(scr, 0, list_w, h, panel_w, "Now Playing")
-        self._render_now_playing(scr, h, list_w, panel_w)
+        screens.render_now_playing(scr, h, list_w, panel_w, self.playlist, self.transport)
 
-    def _render_browser(self, scr, h: int, list_w: int):
-        max_lines = h - 2
-        tracks = self.playlist.tracks
+    def _render_with_analysis(self, scr, h: int, w: int):
+        list_w = max(20, min(int(w * 0.25), 40))
+        panel_w = w - list_w
 
-        if self.browser_cursor < self.browser_scroll:
-            self.browser_scroll = self.browser_cursor
-        if self.browser_cursor >= self.browser_scroll + max_lines:
-            self.browser_scroll = self.browser_cursor - max_lines + 1
+        sort_label = f"Files [{self.playlist.sort.value}]"
+        draw_box(scr, 0, 0, h, list_w, sort_label)
+        self.browser_scroll = screens.render_browser(
+            scr, h, list_w, self.playlist, self.browser_cursor, self.browser_scroll)
 
-        inner_w = list_w - 3
-        for i in range(max_lines):
-            idx = self.browser_scroll + i
-            if idx >= len(tracks):
-                break
-
-            t = tracks[idx]
-            prefix = " * " if idx == self.playlist.current_index else "   "
-            flags = f" [{t.vox_flags}]" if t.vox_flags else ""
-            label = t.display_label + flags
-            line = prefix + truncate_middle(label, max(1, inner_w - len(prefix)))
-
-            attr = curses.A_NORMAL
-            if idx == self.browser_cursor:
-                attr = curses.A_REVERSE
-            if idx == self.playlist.current_index:
-                attr |= curses.A_BOLD
-
-            safe_addstr(scr, 1 + i, 1, line[:inner_w], attr)
-
-    def _render_now_playing(self, scr, h: int, x: int, panel_w: int):
-        ix = x + 2
-        iw = panel_w - 4
-        track = self.playlist.current()
-
-        row = 2
-        if track:
-            safe_addstr(scr, row, ix, truncate_middle(track.display_label, iw), curses.A_BOLD)
-            row += 1
-            # Metadata line: artist - album (if available)
-            meta_parts = []
-            if track.artist:
-                meta_parts.append(track.artist)
-            if track.album:
-                meta_parts.append(track.album)
-            if meta_parts:
-                safe_addstr(scr, row, ix, truncate_middle(" / ".join(meta_parts), iw), curses.A_DIM)
-            row += 1
-        else:
-            safe_addstr(scr, row, ix, "(no tracks)")
-            row += 1
-
-        row += 1
-        if row < h - 3:
-            draw_progress_bar(scr, row, ix, min(iw, 40), self.transport.progress)
-            row += 1
-        if row < h - 2:
-            pos_str = format_time(self.transport.position)
-            dur_str = format_time(self.transport.duration) if self.transport.duration > 0 else "?:??"
-            safe_addstr(scr, row, ix, f"{pos_str} / {dur_str}")
-            row += 1
-        if row < h - 2:
-            safe_addstr(scr, row, ix, f"vol: {int(self.transport.volume * 100)}%")
-            row += 1
-
-        row += 1
-        if row < h - 1:
-            play_ch = ">||" if self.transport.playing else " >> "
-            rep = self.playlist.repeat.value
-            safe_addstr(scr, row, ix, f"|<   {play_ch}   >|   []   r:{rep}"[:iw])
-
-        if row + 2 < h - 1:
-            idx = self.playlist.current_index + 1
-            total = len(self.playlist.tracks)
-            status = f"Track {idx}/{total}  [{self.transport.backend}]  </>:resize  o:sort"
-            safe_addstr(scr, h - 2, ix, status[:iw], curses.A_DIM)
+        self.analysis.set_cursor(self.transport.position)
+        self.analysis.render(scr, 0, list_w, h, panel_w)
 
 
 # Keymap: key code -> unbound method
-# Defined outside class body so curses constants are resolved at import time.
 PlayerApp._KEYMAP = {
     ord('q'):           PlayerApp._action_quit,
     ord(' '):           PlayerApp._action_toggle,

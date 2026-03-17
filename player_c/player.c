@@ -24,10 +24,10 @@
 
 /* ── Sort / Repeat enums ── */
 
-enum sort_mode  { SORT_PATH, SORT_NAME, SORT_COUNT };
+enum sort_mode  { SORT_NAME, SORT_PATH, SORT_ARTIST, SORT_ALBUM, SORT_DURATION, SORT_COUNT };
 enum repeat_mode { REP_NONE, REP_ALL, REP_ONE, REP_COUNT };
 
-static const char *sort_labels[]   = { "path", "name" };
+static const char *sort_labels[]   = { "name", "path", "artist", "album", "dur" };
 static const char *repeat_labels[] = { "none", "all", "one" };
 
 /* ── App state ── */
@@ -103,7 +103,7 @@ static void render_browser(player_t *p, int h, int list_w) {
         const char *marker = (idx == p->current) ? " * " : "   ";
 
         char label[512];
-        tui_truncate_middle(f->name, label, inner_w - 3);
+        tui_truncate_middle(media_display_label(f), label, inner_w - 3);
         snprintf(buf, sizeof(buf), "%s%s", marker, label);
 
         int attr = TUI_NORMAL;
@@ -126,10 +126,16 @@ static void render_now_playing(player_t *p, int h, int x, int panel_w) {
 
     if (p->current >= 0 && p->current < p->files.count) {
         media_file_t *f = &p->files.files[p->current];
-        tui_truncate_middle(f->name, buf, iw);
+        tui_truncate_middle(media_display_label(f), buf, iw);
         tui_print_color(row++, ix, buf, TUI_BOLD, TUI_COLOR_LANE1, iw);
-        if (f->parent[0]) {
-            snprintf(buf, sizeof(buf), "%s/", f->parent);
+        /* Metadata line: artist / album */
+        if (f->artist[0] || f->album[0]) {
+            if (f->artist[0] && f->album[0])
+                snprintf(buf, sizeof(buf), "%s / %s", f->artist, f->album);
+            else if (f->artist[0])
+                snprintf(buf, sizeof(buf), "%s", f->artist);
+            else
+                snprintf(buf, sizeof(buf), "%s", f->album);
             tui_print(row, ix, buf, TUI_DIM, iw);
         }
         row++;
@@ -194,7 +200,7 @@ static void render(player_t *p) {
         /* Mini mode */
         if (p->current >= 0 && p->current < p->files.count) {
             char buf[256];
-            tui_truncate_middle(p->files.files[p->current].name, buf, w);
+            tui_truncate_middle(media_display_label(&p->files.files[p->current]), buf, w);
             tui_print_color(0, 0, buf, TUI_BOLD, TUI_COLOR_LANE1, w);
             char pos[16], dur[16];
             format_time(p->transport.position, pos, sizeof(pos));
@@ -287,10 +293,14 @@ static void handle_key(player_t *p, int key) {
             strncpy(cur_path, p->files.files[p->current].path, MAX_PATH_LEN);
 
         p->sort = (p->sort + 1) % SORT_COUNT;
-        if (p->sort == SORT_NAME)
-            sort_by_name(&p->files);
-        else
-            sort_by_path(&p->files);
+        switch (p->sort) {
+            case SORT_NAME:     sort_by_name(&p->files); break;
+            case SORT_PATH:     sort_by_path(&p->files); break;
+            case SORT_ARTIST:   sort_by_artist(&p->files); break;
+            case SORT_ALBUM:    sort_by_album(&p->files); break;
+            case SORT_DURATION: sort_by_duration(&p->files); break;
+            default:            sort_by_name(&p->files); break;
+        }
 
         if (cur_path[0]) {
             for (int i = 0; i < p->files.count; i++) {
