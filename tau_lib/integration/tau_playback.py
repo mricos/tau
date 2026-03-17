@@ -1,138 +1,43 @@
 """
-Tau multitrack audio playback integration for the tau TUI DAW.
+Tau multitrack audio — pure socket client.
 
-This module provides synchronized audio playback for the DAW by communicating
-with the tau-engine audio engine via Unix domain sockets.
-
-Architecture:
-    tau TUI lanes 1-8 → tau-engine samples 1-8 → tau-engine channels 0-3 → master
+Process management (start/stop engine) lives in engine.py.
+This module is only responsible for sending commands over the socket.
 
 Usage:
-    tau = TauMultitrack()
-    tau.load_track(1, Path("audio.wav"))
-    tau.set_loop(1, True)
-    tau.play_track(1)
-    tau.seek(1, 5.0)  # Seek to 5 seconds
-    tau.stop_track(1)
+    from tau_lib.integration.engine import connect_engine
+    result = connect_engine()
+    if result.ok:
+        result.engine.load_track(1, Path("audio.wav"))
+        result.engine.play_track(1)
 """
 
 import os
 import socket
-import subprocess
-import time
-import atexit
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Dict
 
 
 class TauMultitrack:
-    """Direct socket communication with tau-engine for multitrack playback."""
+    """Socket client for tau-engine. Does not manage engine lifecycle."""
 
-    def __init__(self, socket_path: str = None, auto_start: bool = True):
-        """
-        Initialize tau multitrack controller.
-
-        Args:
-            socket_path: Path to tau Unix socket (default: /tmp/tau-{pid}.sock)
-            auto_start: Automatically start tau-engine if not running (default: True)
-        """
-        # Use temp socket unique to this process
+    def __init__(self, socket_path: str | None = None, auto_start: bool = False):
         if socket_path is None:
-            socket_path = f"/tmp/tau-{os.getpid()}.sock"
-        self.socket_path = Path(socket_path)
-        self.loaded_tracks: Dict[int, Path] = {}  # track_id -> audio_path
-        self.engine_process: Optional[subprocess.Popen] = None
-
-        # Auto-start tau-engine if requested and not already running
-        if auto_start and not self.check_connection():
-            self._start_engine()
-
-    def _start_engine(self) -> None:
-        """
-        Start tau-engine daemon in the background.
-
-        Looks for tau-engine binary relative to project structure.
-        """
-        # Find tau-engine binary relative to project root
-        # tau_lib/integration/tau_playback.py -> ../../engine/tau-engine
-        script_dir = Path(__file__).parent
-        project_root = script_dir.parent.parent
-        engine_paths = [
-            project_root / "engine" / "tau-engine",
-        ]
-
-        engine_binary = None
-        for path in engine_paths:
-            if path.exists():
-                engine_binary = path
-                break
-
-        if not engine_binary:
-            raise FileNotFoundError(
-                f"tau-engine binary not found. Searched: {[str(p) for p in engine_paths]}"
+            socket_path = os.environ.get(
+                "TAU_SOCKET",
+                str(Path.home() / "tau" / "runtime" / "tau.sock"),
             )
+        self.socket_path = Path(socket_path)
+        self.loaded_tracks: Dict[int, Path] = {}
 
-        # Remove stale socket if it exists
-        if self.socket_path.exists():
-            self.socket_path.unlink()
-
-        # Start tau-engine as background daemon with our socket path
-        self.engine_process = subprocess.Popen(
-            [str(engine_binary), "--socket", str(self.socket_path)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True
-        )
-
-        # Register cleanup handler
-        atexit.register(self._cleanup_engine)
-
-        # Wait for socket to appear (up to 2 seconds)
-        for _ in range(20):
-            time.sleep(0.1)
-            if self.socket_path.exists():
-                break
-
-        if not self.socket_path.exists():
-            raise ConnectionError("tau-engine started but socket not created")
-
-    def _cleanup_engine(self) -> None:
-        """Clean up auto-started tau-engine process and socket."""
-        if self.engine_process:
-            try:
-                self.engine_process.terminate()
-                self.engine_process.wait(timeout=0.1)  # Quick timeout, don't block
-            except:
-                # Process didn't die quickly, that's fine - OS will clean up
-                pass
-            self.engine_process = None
-
-            # Unregister atexit handler since we've done manual cleanup
-            try:
-                atexit.unregister(self._cleanup_engine)
-            except:
-                pass
-
-        # Remove socket file
-        if self.socket_path.exists():
-            try:
-                self.socket_path.unlink()
-            except:
-                pass
+        # Legacy: callers passing auto_start=True should use connect_engine()
+        if auto_start and not self.check_connection():
+            from tau_lib.integration.engine import connect_engine
+            result = connect_engine(auto_start=True)
+            if result.ok:
+                self.socket_path = result.engine.socket_path
 
     def _send_command(self, cmd: str) -> str:
-        """
-        Send command to tau daemon and receive response.
-
-        Args:
-            cmd: Command string (e.g., "SAMPLE 1 LOAD /path/to/audio.wav")
-
-        Returns:
-            Response string from tau (e.g., "OK SAMPLE 1 LOADED ...")
-
-        Raises:
-            ConnectionError: If tau socket not found or connection fails
-        """
         if not self.socket_path.exists():
             raise ConnectionError(f"Tau socket not found: {self.socket_path}")
 
@@ -140,247 +45,82 @@ class TauMultitrack:
         client_path = f"/tmp/tau-client-{os.getpid()}.sock"
 
         try:
-            # Bind to temporary client socket
             sock.bind(client_path)
-
-            # Send command to tau
             sock.sendto(cmd.encode(), str(self.socket_path))
-
-            # Receive response with timeout
-            sock.settimeout(0.3)  # Fast timeout - don't block on quit
+            sock.settimeout(0.3)
             response, _ = sock.recvfrom(4096)
             return response.decode().strip()
-
         except socket.timeout:
             raise ConnectionError(f"Tau command timed out: {cmd}")
         finally:
             sock.close()
             Path(client_path).unlink(missing_ok=True)
 
-    # === Track/Sample Management ===
+    # ── Track/Sample ──
 
     def load_track(self, track_id: int, audio_path: Path) -> bool:
-        """
-        Load audio file to tau sample slot.
-
-        Args:
-            track_id: Track number (1-16, typically 1-8 for lanes)
-            audio_path: Path to audio file (.wav, .mp3, etc.)
-
-        Returns:
-            True if loaded successfully, False otherwise
-        """
         audio_path = audio_path.expanduser().resolve()
         if not audio_path.exists():
             return False
-
         result = self._send_command(f"SAMPLE {track_id} LOAD {audio_path}")
-
         if result.startswith("OK"):
             self.loaded_tracks[track_id] = audio_path
             return True
-        else:
-            return False
+        return False
 
     def play_track(self, track_id: int) -> bool:
-        """
-        Trigger playback of loaded sample.
-
-        Args:
-            track_id: Track number (1-16)
-
-        Returns:
-            True if triggered successfully
-        """
-        result = self._send_command(f"SAMPLE {track_id} TRIG")
-        return result.startswith("OK")
+        return self._send_command(f"SAMPLE {track_id} TRIG").startswith("OK")
 
     def stop_track(self, track_id: int) -> bool:
-        """
-        Stop sample playback.
+        return self._send_command(f"SAMPLE {track_id} STOP").startswith("OK")
 
-        Args:
-            track_id: Track number (1-16)
-
-        Returns:
-            True if stopped successfully
-        """
-        result = self._send_command(f"SAMPLE {track_id} STOP")
-        return result.startswith("OK")
-
-    # === Seeking & Looping ===
+    # ── Seeking & Looping ──
 
     def seek(self, track_id: int, time_seconds: float) -> bool:
-        """
-        Seek to position in sample (in seconds).
-
-        Args:
-            track_id: Track number (1-16)
-            time_seconds: Target time in seconds
-
-        Returns:
-            True if seek succeeded
-        """
-        result = self._send_command(f"SAMPLE {track_id} SEEK {time_seconds:.3f}")
-        return result.startswith("OK")
+        return self._send_command(f"SAMPLE {track_id} SEEK {time_seconds:.3f}").startswith("OK")
 
     def set_loop(self, track_id: int, loop: bool) -> bool:
-        """
-        Enable/disable looping for sample.
+        return self._send_command(f"SAMPLE {track_id} LOOP {1 if loop else 0}").startswith("OK")
 
-        Args:
-            track_id: Track number (1-16)
-            loop: True to loop, False for one-shot
-
-        Returns:
-            True if set successfully
-        """
-        result = self._send_command(f"SAMPLE {track_id} LOOP {1 if loop else 0}")
-        return result.startswith("OK")
-
-    # === Track Controls ===
+    # ── Track Controls ──
 
     def set_track_gain(self, track_id: int, gain: float) -> bool:
-        """
-        Set track gain/volume.
-
-        Args:
-            track_id: Track number (1-16)
-            gain: Gain multiplier (0.0-10.0, typically 0.0-1.0)
-
-        Returns:
-            True if set successfully
-        """
-        result = self._send_command(f"SAMPLE {track_id} GAIN {gain:.3f}")
-        return result.startswith("OK")
+        return self._send_command(f"SAMPLE {track_id} GAIN {gain:.3f}").startswith("OK")
 
     def assign_track_channel(self, track_id: int, channel: int) -> bool:
-        """
-        Assign track to mixer channel for submixing.
+        return self._send_command(f"SAMPLE {track_id} CHAN {channel}").startswith("OK")
 
-        Args:
-            track_id: Track number (1-16)
-            channel: Mixer channel (0-3)
-
-        Returns:
-            True if assigned successfully
-        """
-        result = self._send_command(f"SAMPLE {track_id} CHAN {channel}")
-        return result.startswith("OK")
-
-    # === Channel/Bus Control ===
+    # ── Channel/Bus Control ──
 
     def set_channel_gain(self, channel: int, gain: float) -> bool:
-        """
-        Set mixer channel gain (for submixing).
-
-        Args:
-            channel: Channel number (1-4, maps to 0-3 internally)
-            gain: Gain multiplier (0.0-10.0)
-
-        Returns:
-            True if set successfully
-        """
-        result = self._send_command(f"CH {channel} GAIN {gain:.3f}")
-        return result.startswith("OK")
+        return self._send_command(f"CH {channel} GAIN {gain:.3f}").startswith("OK")
 
     def set_channel_pan(self, channel: int, pan: float) -> bool:
-        """
-        Set mixer channel pan.
+        return self._send_command(f"CH {channel} PAN {pan:.3f}").startswith("OK")
 
-        Args:
-            channel: Channel number (1-4)
-            pan: Pan position (-1.0=left, 0.0=center, 1.0=right)
-
-        Returns:
-            True if set successfully
-        """
-        result = self._send_command(f"CH {channel} PAN {pan:.3f}")
-        return result.startswith("OK")
-
-    # === Master Control ===
+    # ── Master Control ──
 
     def set_master_gain(self, gain: float) -> bool:
-        """
-        Set master output gain.
+        return self._send_command(f"MASTER {gain:.3f}").startswith("OK")
 
-        Args:
-            gain: Master gain (0.0-10.0, typically 0.0-1.0)
-
-        Returns:
-            True if set successfully
-        """
-        result = self._send_command(f"MASTER {gain:.3f}")
-        return result.startswith("OK")
-
-    # === Bulk Operations ===
+    # ── Bulk Operations ──
 
     def play_all(self) -> None:
-        """Trigger playback of all loaded tracks."""
-        for track_id in self.loaded_tracks.keys():
+        for track_id in self.loaded_tracks:
             self.play_track(track_id)
 
     def stop_all(self) -> None:
-        """Stop playback of all tracks."""
-        for track_id in self.loaded_tracks.keys():
+        for track_id in self.loaded_tracks:
             self.stop_track(track_id)
 
     def seek_all(self, time_seconds: float) -> None:
-        """Seek all tracks to the same position."""
-        for track_id in self.loaded_tracks.keys():
+        for track_id in self.loaded_tracks:
             self.seek(track_id, time_seconds)
 
-    # === Status ===
+    # ── Status ──
 
     def check_connection(self) -> bool:
-        """
-        Check if tau daemon is running and responding.
-
-        Returns:
-            True if tau is responding
-        """
         try:
-            result = self._send_command("STATUS")
-            return result.startswith("OK")
+            return self._send_command("STATUS").startswith("OK")
         except ConnectionError:
             return False
-
-
-# === Example Usage ===
-
-if __name__ == "__main__":
-    # Example: Load and play a track with looping and seeking
-    tau = TauMultitrack()
-
-    if not tau.check_connection():
-        print("Error: tau-engine daemon not running and could not auto-start")
-        print("Try starting manually: ./tau/engine/tau-engine")
-        exit(1)
-
-    print("✓ Connected to tau-engine")
-
-    # Load audio file to track 1
-    audio_file = Path("~/src/mricos/demos/tscale/audio.wav")
-    if tau.load_track(1, audio_file):
-        print(f"✓ Loaded: {audio_file}")
-
-    # Configure track
-    tau.set_loop(1, True)
-    tau.set_track_gain(1, 0.3)
-    tau.assign_track_channel(1, 0)
-
-    # Play
-    print("▶ Playing track 1...")
-    tau.play_track(1)
-
-    # Wait and seek
-    import time
-    time.sleep(3)
-    print("⏩ Seeking to 5.0 seconds...")
-    tau.seek(1, 5.0)
-
-    time.sleep(3)
-    print("⏹ Stopping...")
-    tau.stop_track(1)
-
-    print("Done!")

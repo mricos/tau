@@ -407,24 +407,16 @@ def _engine_status(app_state) -> str:
 
 def _engine_start(app_state) -> str:
     """Start tau-engine."""
-    from tau_lib.integration.tau_playback import TauMultitrack
-
-    # Check if already running
     if app_state.transport.tau and app_state.transport.tau.check_connection():
         return "✓ Engine already running"
 
     try:
-        # Try to create new connection with auto-start
-        tau = TauMultitrack(auto_start=True)
-        if tau.check_connection():
-            app_state.transport.tau = tau
-            return f"✓ Engine started (socket: {tau.socket_path})"
-        else:
-            return "✗ Engine started but not responding"
-    except FileNotFoundError as e:
-        return f"✗ Engine binary not found: {e}"
-    except ConnectionError as e:
-        return f"✗ Connection failed: {e}"
+        from tau_lib.integration.engine import connect_engine
+        result = connect_engine(auto_start=True)
+        if result.ok:
+            app_state.transport.tau = result.engine
+            return f"✓ Engine started ({result.method}, socket: {result.engine.socket_path})"
+        return f"✗ {result.error}"
     except Exception as e:
         return f"✗ Failed to start engine: {e}"
 

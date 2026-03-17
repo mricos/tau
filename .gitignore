@@ -16,5 +16,12 @@ test_script.tau
 # macOS
 .DS_Store
 
+# Compiled binaries
+player_c/tau-player
+tau_lib/algorithms/filterbank/filterbank
+tau_lib/algorithms/phoneme/phoneme_analyze
+tau_lib/algorithms/phoneme/miniaudio.h
+tau_lib/algorithms/tscale/tscale
+
 # Output files
 *.png

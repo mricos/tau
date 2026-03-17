@@ -11,6 +11,7 @@ from tui_py.rendering.helpers import (
 from player_py.scanner import scan_directory
 from player_py.playlist import Playlist, SortMode
 from player_py.transport import PlayerTransport
+from player_py.analysis import AnalysisScreen
 
 
 class PlayerApp:
@@ -22,6 +23,8 @@ class PlayerApp:
         self.browser_scroll: int = 0
         self.split_ratio: float = 0.35
         self.running = True
+        self.analysis = AnalysisScreen()
+        self.show_analysis: bool = False
 
     def scan(self):
         files = scan_directory(self.directory)
@@ -89,6 +92,23 @@ class PlayerApp:
     def _action_narrow_list(self):
         self.split_ratio = max(0.15, self.split_ratio - 0.05)
 
+    def _action_toggle_analysis(self):
+        track = self.playlist.current()
+        if track and track.vox_id:
+            self.show_analysis = not self.show_analysis
+            if self.show_analysis:
+                self.analysis.load(track.path, track.vox_id, track.vox_voice)
+
+    def _action_export_training(self):
+        if self.show_analysis and self.analysis.bundle:
+            out = self.analysis.handle_export(self.directory)
+            # Briefly flash exported path — visible next render cycle
+            self._export_msg = out if out else "No data to export"
+
+    def _action_filter_annotated(self):
+        self.playlist.filter_annotated()
+        self.browser_cursor = 0
+
     def _action_cycle_sort(self):
         current = self.playlist.current()
         self.playlist.cycle_sort()
@@ -123,6 +143,8 @@ class PlayerApp:
 
             if w < 40 or h < 10:
                 self._render_mini(scr, h, w)
+            elif self.show_analysis:
+                self._render_with_analysis(scr, h, w)
             elif w >= 120:
                 self._render_standard(scr, h, w, wide=True)
             else:
@@ -166,6 +188,21 @@ class PlayerApp:
             rep = self.playlist.repeat.value
             safe_addstr(scr, row, 0, f"|<  {play_ch}  >|  []  r:{rep}  [{self.transport.backend}]"[:w])
 
+    # ── Analysis Mode ──
+
+    def _render_with_analysis(self, scr, h: int, w: int):
+        # Left: file browser (narrow), Right: analysis (wide)
+        list_w = max(20, min(int(w * 0.25), 40))
+        panel_w = w - list_w
+
+        sort_label = f"Files [{self.playlist.sort.value}]"
+        draw_box(scr, 0, 0, h, list_w, sort_label)
+        self._render_browser(scr, h, list_w, wide=False)
+
+        # Update cursor time from transport
+        self.analysis.set_cursor(self.transport.position)
+        self.analysis.render(scr, 0, list_w, h, panel_w)
+
     # ── Standard Mode (>= 40 cols, >= 10 rows) ──
 
     def _render_standard(self, scr, h: int, w: int, wide: bool = False):
@@ -196,7 +233,10 @@ class PlayerApp:
 
             t = tracks[idx]
             prefix = " * " if idx == self.playlist.current_index else "   "
-            label = f"{t.parent_dir}/{t.name}" if wide and t.parent_dir else t.name
+            # Show vox flags indicator if annotated
+            flags = f" [{t.vox_flags}]" if t.vox_flags else ""
+            label = f"{t.parent_dir}/{t.display_label}" if wide and t.parent_dir else t.display_label
+            label += flags
             line = prefix + truncate_middle(label, max(1, inner_w - len(prefix)))
 
             attr = curses.A_NORMAL
@@ -280,6 +320,9 @@ PlayerApp._KEYMAP = {
     ord('<'):           PlayerApp._action_narrow_list,
     ord(','):           PlayerApp._action_narrow_list,
     ord('o'):           PlayerApp._action_cycle_sort,
+    ord('a'):           PlayerApp._action_toggle_analysis,
+    ord('e'):           PlayerApp._action_export_training,
+    ord('A'):           PlayerApp._action_filter_annotated,
 }
 
 

@@ -2,14 +2,9 @@
 Canonical tau-engine connection policy.
 
 Startup precedence:
-  1. Connect to existing engine at ~/tau/runtime/tau.sock
-     (user ran `tau start` from their terminal — has audio access)
+  1. Connect to existing engine at $TAU_SOCKET (default ~/tau/runtime/tau.sock)
   2. Direct-start engine in current session at the shared socket path
      (inherits caller's audio session — sound works on macOS)
-
-TSM `setsid` detaches from the macOS audio session, so we never
-auto-start via `tsm start` from Python. If the user wants TSM
-management, they run `tau start` themselves first.
 
 Every caller that needs a TauMultitrack should use connect_engine().
 """
@@ -22,10 +17,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-# ── Constants ──
 
-TAU_SOCKET = Path.home() / "tau" / "runtime" / "tau.sock"
-TAU_RUNTIME_DIR = Path.home() / "tau" / "runtime"
+def _default_socket() -> Path:
+    return Path(os.environ.get(
+        "TAU_SOCKET",
+        str(Path.home() / "tau" / "runtime" / "tau.sock"),
+    ))
 
 
 def _find_engine_binary() -> Optional[Path]:
@@ -34,7 +31,6 @@ def _find_engine_binary() -> Optional[Path]:
     candidate = project_root / "engine" / "tau-engine"
     if candidate.exists() and os.access(candidate, os.X_OK):
         return candidate
-
     try:
         r = subprocess.run(
             ["which", "tau-engine"], capture_output=True, text=True, timeout=2
@@ -43,25 +39,23 @@ def _find_engine_binary() -> Optional[Path]:
             return Path(r.stdout.strip())
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
-
     return None
 
 
 @dataclass
 class EngineResult:
-    """Result of connect_engine() — always check .ok before using .engine."""
+    """Result of connect_engine(). Check .ok before using .engine."""
     engine: Optional['TauMultitrack'] = None
     method: str = "none"   # "tsm", "started", "none"
     error: str = ""
-    process: Optional[subprocess.Popen] = None  # non-None if we started it
 
     @property
     def ok(self) -> bool:
         return self.engine is not None
 
 
-# Module-level ref so atexit can clean up
 _started_process: Optional[subprocess.Popen] = None
+_atexit_registered: bool = False
 
 
 def _cleanup():
@@ -73,35 +67,29 @@ def _cleanup():
         except subprocess.TimeoutExpired:
             _started_process.kill()
     _started_process = None
-    # Don't remove TAU_SOCKET — another process may own it
 
 
 def connect_engine(auto_start: bool = True) -> EngineResult:
     """
     Connect to tau-engine using the canonical startup precedence.
 
-    Args:
-        auto_start: If True, start engine when not running.
-                    If False, only connect to existing engine.
-
     Returns:
         EngineResult with .engine, .method, .error
     """
     from tau_lib.integration.tau_playback import TauMultitrack
 
+    sock = _default_socket()
+
     # ── Step 1: Try existing engine at shared socket ──
-    if TAU_SOCKET.exists():
+    if sock.exists():
         try:
-            engine = TauMultitrack(
-                socket_path=str(TAU_SOCKET), auto_start=False
-            )
+            engine = TauMultitrack(socket_path=str(sock))
             if engine.check_connection():
                 return EngineResult(engine=engine, method="tsm")
         except Exception:
             pass
-        # Stale socket — clean it up
         try:
-            TAU_SOCKET.unlink()
+            sock.unlink()
         except OSError:
             pass
 
@@ -115,35 +103,33 @@ def connect_engine(auto_start: bool = True) -> EngineResult:
             error="tau-engine binary not found (tried project tree and PATH)"
         )
 
-    global _started_process
-    TAU_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    global _started_process, _atexit_registered
+    sock.parent.mkdir(parents=True, exist_ok=True)
 
     proc = subprocess.Popen(
-        [str(binary), "--socket", str(TAU_SOCKET)],
+        [str(binary), "--socket", str(sock)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        # No start_new_session — stay in caller's audio session
     )
     _started_process = proc
-    atexit.register(_cleanup)
+    if not _atexit_registered:
+        atexit.register(_cleanup)
+        _atexit_registered = True
 
-    # Wait for socket
     for _ in range(30):
         time.sleep(0.1)
-        if TAU_SOCKET.exists():
+        if sock.exists():
             break
 
-    if not TAU_SOCKET.exists():
+    if not sock.exists():
         proc.kill()
         _started_process = None
         return EngineResult(error="tau-engine started but socket not created")
 
     try:
-        engine = TauMultitrack(
-            socket_path=str(TAU_SOCKET), auto_start=False
-        )
+        engine = TauMultitrack(socket_path=str(sock))
         if engine.check_connection():
-            return EngineResult(engine=engine, method="started", process=proc)
+            return EngineResult(engine=engine, method="started")
     except Exception:
         pass
 
