@@ -8,8 +8,8 @@ from tui_py.rendering.helpers import (
     safe_addstr, draw_progress_bar, draw_box, truncate_middle, format_time,
     init_colors,
 )
-from player_py.scanner import scan_directory, group_by_directory, MediaFile
-from player_py.playlist import Playlist, RepeatMode
+from player_py.scanner import scan_directory
+from player_py.playlist import Playlist, SortMode
 from player_py.transport import PlayerTransport
 
 
@@ -20,12 +20,12 @@ class PlayerApp:
         self.playlist = Playlist()
         self.browser_cursor: int = 0
         self.browser_scroll: int = 0
+        self.split_ratio: float = 0.35
         self.running = True
 
     def scan(self):
         files = scan_directory(self.directory)
         self.playlist = Playlist(files)
-        self.groups = group_by_directory(files)
 
     def load_current(self):
         track = self.playlist.current()
@@ -35,6 +35,78 @@ class PlayerApp:
     def play_current(self):
         self.load_current()
         self.transport.play()
+
+    # ── Key bindings ──
+
+    def _action_quit(self):
+        self.running = False
+
+    def _action_toggle(self):
+        if self.transport.has_track:
+            self.transport.toggle()
+        else:
+            self.play_current()
+
+    def _action_next(self):
+        if self.playlist.next():
+            self.play_current()
+
+    def _action_prev(self):
+        if self.playlist.prev():
+            self.play_current()
+
+    def _action_stop(self):
+        self.transport.stop()
+
+    def _action_seek_fwd(self):
+        self.transport.seek_relative(5.0)
+
+    def _action_seek_back(self):
+        self.transport.seek_relative(-5.0)
+
+    def _action_cursor_up(self):
+        self.browser_cursor = max(0, self.browser_cursor - 1)
+
+    def _action_cursor_down(self):
+        self.browser_cursor = min(len(self.playlist.tracks) - 1, self.browser_cursor + 1)
+
+    def _action_select(self):
+        self.playlist.select(self.browser_cursor)
+        self.play_current()
+
+    def _action_cycle_repeat(self):
+        self.playlist.cycle_repeat()
+
+    def _action_vol_up(self):
+        self.transport.set_volume(self.transport.volume + 0.05)
+
+    def _action_vol_down(self):
+        self.transport.set_volume(self.transport.volume - 0.05)
+
+    def _action_widen_list(self):
+        self.split_ratio = min(0.8, self.split_ratio + 0.05)
+
+    def _action_narrow_list(self):
+        self.split_ratio = max(0.15, self.split_ratio - 0.05)
+
+    def _action_cycle_sort(self):
+        current = self.playlist.current()
+        self.playlist.cycle_sort()
+        if current:
+            for i, t in enumerate(self.playlist.tracks):
+                if t.path == current.path:
+                    self.browser_cursor = i
+                    self.playlist.current_index = i
+                    break
+
+    _KEYMAP: dict  # populated after class body
+
+    def _handle_key(self, key: int):
+        action = self._KEYMAP.get(key)
+        if action:
+            action(self)
+
+    # ── Main loop ──
 
     def run(self, scr):
         scr.timeout(50)
@@ -58,53 +130,13 @@ class PlayerApp:
 
             scr.refresh()
 
-            # Update transport
             if self.transport.update():
-                # Track ended — auto-advance
-                nxt = self.playlist.next()
-                if nxt:
+                if self.playlist.next():
                     self.play_current()
 
             key = scr.getch()
-            if key == -1:
-                continue
-            self._handle_key(key, h)
-
-    def _handle_key(self, key: int, h: int):
-        if key == ord('q'):
-            self.running = False
-        elif key == ord(' '):
-            if self.transport.has_track:
-                self.transport.toggle()
-            else:
-                self.play_current()
-        elif key == ord('n'):
-            trk = self.playlist.next()
-            if trk:
-                self.play_current()
-        elif key == ord('p'):
-            trk = self.playlist.prev()
-            if trk:
-                self.play_current()
-        elif key == ord('s'):
-            self.transport.stop()
-        elif key in (curses.KEY_RIGHT, ord('l')):
-            self.transport.seek_relative(5.0)
-        elif key in (curses.KEY_LEFT, ord('h')):
-            self.transport.seek_relative(-5.0)
-        elif key in (curses.KEY_UP, ord('k')):
-            self.browser_cursor = max(0, self.browser_cursor - 1)
-        elif key in (curses.KEY_DOWN, ord('j')):
-            self.browser_cursor = min(len(self.playlist.tracks) - 1, self.browser_cursor + 1)
-        elif key in (curses.KEY_ENTER, ord('\n'), 10):
-            self.playlist.select(self.browser_cursor)
-            self.play_current()
-        elif key == ord('r'):
-            self.playlist.cycle_repeat()
-        elif key == ord('+') or key == ord('='):
-            self.transport.set_volume(self.transport.volume + 0.05)
-        elif key == ord('-'):
-            self.transport.set_volume(self.transport.volume - 0.05)
+            if key != -1:
+                self._handle_key(key)
 
     # ── Mini Mode (< 40 cols or < 10 rows) ──
 
@@ -120,65 +152,51 @@ class PlayerApp:
             safe_addstr(scr, row, 0, truncate_middle(parent, w), curses.A_DIM)
         row += 1
 
-        # Time
         pos_str = format_time(self.transport.position)
         dur_str = format_time(self.transport.duration) if self.transport.duration > 0 else "?:??"
-        time_str = f"{pos_str} / {dur_str}"
-        safe_addstr(scr, row, 0, time_str[:w])
+        safe_addstr(scr, row, 0, f"{pos_str} / {dur_str}"[:w])
         row += 1
 
-        # Progress bar
         if row < h:
-            bar_w = min(w, 40)
-            draw_progress_bar(scr, row, 0, bar_w, self.transport.progress)
+            draw_progress_bar(scr, row, 0, min(w, 40), self.transport.progress)
             row += 1
 
-        # Transport controls
         if row < h:
             play_ch = "||" if self.transport.playing else ">>"
             rep = self.playlist.repeat.value
-            controls = f"|<  {play_ch}  >|  []  r:{rep}  [{self.transport.backend}]"
-            safe_addstr(scr, row, 0, controls[:w])
+            safe_addstr(scr, row, 0, f"|<  {play_ch}  >|  []  r:{rep}  [{self.transport.backend}]"[:w])
 
     # ── Standard Mode (>= 40 cols, >= 10 rows) ──
 
     def _render_standard(self, scr, h: int, w: int, wide: bool = False):
-        list_w = max(20, int(w * 0.35))
+        list_w = max(20, min(w - 20, int(w * self.split_ratio)))
         panel_w = w - list_w
 
-        # File browser (left panel)
-        draw_box(scr, 0, 0, h, list_w, "Files")
+        sort_label = f"Files [{self.playlist.sort.value}]"
+        draw_box(scr, 0, 0, h, list_w, sort_label)
         self._render_browser(scr, h, list_w, wide)
 
-        # Now Playing (right panel)
         draw_box(scr, 0, list_w, h, panel_w, "Now Playing")
         self._render_now_playing(scr, h, list_w, panel_w, wide)
 
     def _render_browser(self, scr, h: int, list_w: int, wide: bool):
-        max_lines = h - 2  # inside box
+        max_lines = h - 2
         tracks = self.playlist.tracks
 
-        # Adjust scroll so cursor is visible
         if self.browser_cursor < self.browser_scroll:
             self.browser_scroll = self.browser_cursor
         if self.browser_cursor >= self.browser_scroll + max_lines:
             self.browser_scroll = self.browser_cursor - max_lines + 1
 
-        inner_w = list_w - 3  # box borders + padding
+        inner_w = list_w - 3
         for i in range(max_lines):
             idx = self.browser_scroll + i
             if idx >= len(tracks):
                 break
 
             t = tracks[idx]
-            row = 1 + i
-
-            # Build display line
             prefix = " * " if idx == self.playlist.current_index else "   "
-            label = t.name
-            if wide and t.parent_dir:
-                label = f"{t.parent_dir}/{t.name}"
-
+            label = f"{t.parent_dir}/{t.name}" if wide and t.parent_dir else t.name
             line = prefix + truncate_middle(label, max(1, inner_w - len(prefix)))
 
             attr = curses.A_NORMAL
@@ -187,63 +205,82 @@ class PlayerApp:
             if idx == self.playlist.current_index:
                 attr |= curses.A_BOLD
 
-            safe_addstr(scr, row, 1, line[:inner_w], attr)
+            safe_addstr(scr, 1 + i, 1, line[:inner_w], attr)
 
     def _render_now_playing(self, scr, h: int, x: int, panel_w: int, wide: bool):
-        inner_x = x + 2
-        inner_w = panel_w - 4
+        ix = x + 2
+        iw = panel_w - 4
         track = self.playlist.current()
 
         row = 2
         if track:
-            safe_addstr(scr, row, inner_x, truncate_middle(track.name, inner_w), curses.A_BOLD)
+            safe_addstr(scr, row, ix, truncate_middle(track.name, iw), curses.A_BOLD)
             row += 1
             if track.parent_dir:
-                safe_addstr(scr, row, inner_x, truncate_middle(track.parent_dir + '/', inner_w), curses.A_DIM)
+                safe_addstr(scr, row, ix, truncate_middle(track.parent_dir + '/', iw), curses.A_DIM)
             row += 1
             if wide:
-                safe_addstr(scr, row, inner_x, truncate_middle(str(track.path), inner_w), curses.A_DIM)
+                safe_addstr(scr, row, ix, truncate_middle(str(track.path), iw), curses.A_DIM)
                 row += 1
         else:
-            safe_addstr(scr, row, inner_x, "(no tracks)")
+            safe_addstr(scr, row, ix, "(no tracks)")
             row += 1
 
         row += 1
-
-        # Progress bar
         if row < h - 3:
-            bar_w = min(inner_w, 40)
-            draw_progress_bar(scr, row, inner_x, bar_w, self.transport.progress)
+            draw_progress_bar(scr, row, ix, min(iw, 40), self.transport.progress)
             row += 1
-
-        # Time
         if row < h - 2:
             pos_str = format_time(self.transport.position)
             dur_str = format_time(self.transport.duration) if self.transport.duration > 0 else "?:??"
-            safe_addstr(scr, row, inner_x, f"{pos_str} / {dur_str}")
+            safe_addstr(scr, row, ix, f"{pos_str} / {dur_str}")
             row += 1
-
-        # Volume
         if row < h - 2:
-            vol_pct = int(self.transport.volume * 100)
-            safe_addstr(scr, row, inner_x, f"vol: {vol_pct}%")
+            safe_addstr(scr, row, ix, f"vol: {int(self.transport.volume * 100)}%")
             row += 1
 
         row += 1
-
-        # Transport controls
         if row < h - 1:
             play_ch = ">||" if self.transport.playing else " >> "
             rep = self.playlist.repeat.value
-            controls = f"|<   {play_ch}   >|   []   r:{rep}"
-            safe_addstr(scr, row, inner_x, controls[:inner_w])
+            safe_addstr(scr, row, ix, f"|<   {play_ch}   >|   []   r:{rep}"[:iw])
 
-        # Track info + backend status
         if row + 2 < h - 1:
             idx = self.playlist.current_index + 1
             total = len(self.playlist.tracks)
-            status = f"Track {idx}/{total}  [{self.transport.backend}]"
-            safe_addstr(scr, h - 2, inner_x, status, curses.A_DIM)
+            status = f"Track {idx}/{total}  [{self.transport.backend}]  </>:resize  o:sort"
+            safe_addstr(scr, h - 2, ix, status[:iw], curses.A_DIM)
+
+
+# Keymap: key code -> unbound method
+# Defined outside class body so curses constants are resolved at import time.
+PlayerApp._KEYMAP = {
+    ord('q'):           PlayerApp._action_quit,
+    ord(' '):           PlayerApp._action_toggle,
+    ord('n'):           PlayerApp._action_next,
+    ord('p'):           PlayerApp._action_prev,
+    ord('s'):           PlayerApp._action_stop,
+    curses.KEY_RIGHT:   PlayerApp._action_seek_fwd,
+    ord('l'):           PlayerApp._action_seek_fwd,
+    curses.KEY_LEFT:    PlayerApp._action_seek_back,
+    ord('h'):           PlayerApp._action_seek_back,
+    curses.KEY_UP:      PlayerApp._action_cursor_up,
+    ord('k'):           PlayerApp._action_cursor_up,
+    curses.KEY_DOWN:    PlayerApp._action_cursor_down,
+    ord('j'):           PlayerApp._action_cursor_down,
+    curses.KEY_ENTER:   PlayerApp._action_select,
+    ord('\n'):          PlayerApp._action_select,
+    10:                 PlayerApp._action_select,
+    ord('r'):           PlayerApp._action_cycle_repeat,
+    ord('+'):           PlayerApp._action_vol_up,
+    ord('='):           PlayerApp._action_vol_up,
+    ord('-'):           PlayerApp._action_vol_down,
+    ord('>'):           PlayerApp._action_widen_list,
+    ord('.'):           PlayerApp._action_widen_list,
+    ord('<'):           PlayerApp._action_narrow_list,
+    ord(','):           PlayerApp._action_narrow_list,
+    ord('o'):           PlayerApp._action_cycle_sort,
+}
 
 
 def main():

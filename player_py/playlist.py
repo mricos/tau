@@ -10,11 +10,17 @@ class RepeatMode(Enum):
     ONE = "one"
 
 
+class SortMode(Enum):
+    PATH = "path"
+    NAME = "name"
+
+
 class Playlist:
     def __init__(self, tracks: list[MediaFile] | None = None):
         self.tracks: list[MediaFile] = tracks or []
         self.current_index: int = 0
         self.repeat: RepeatMode = RepeatMode.NONE
+        self.sort: SortMode = SortMode.PATH
 
     @property
     def empty(self) -> bool:
@@ -57,3 +63,16 @@ class Playlist:
         idx = modes.index(self.repeat)
         self.repeat = modes[(idx + 1) % len(modes)]
         return self.repeat
+
+    def cycle_sort(self) -> SortMode:
+        modes = list(SortMode)
+        idx = modes.index(self.sort)
+        self.sort = modes[(idx + 1) % len(modes)]
+        self._apply_sort()
+        return self.sort
+
+    def _apply_sort(self):
+        if self.sort == SortMode.PATH:
+            self.tracks.sort(key=lambda t: str(t.path))
+        elif self.sort == SortMode.NAME:
+            self.tracks.sort(key=lambda t: t.name.lower())
